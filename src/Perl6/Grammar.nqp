@@ -3420,7 +3420,7 @@ grammar Perl6::Grammar is HLL::Grammar does STD {
         <rad_digit>+ [ _ <rad_digit>+ ]*
     }
 
-    tokwn uni_nl_no {
+    token uni_nl_no {
         <:Nl+:No>
     }
 
