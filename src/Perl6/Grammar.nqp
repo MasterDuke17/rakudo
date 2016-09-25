@@ -3425,19 +3425,19 @@ grammar Perl6::Grammar is HLL::Grammar does STD {
     }
 
     token rad_number {
+        :dba('number in radix notation')
         ':' $<radix> =
         [
         || \d+ <.unsp>?
-        || <uni_nl_no>+ <.unicode_non_digits: ["colon pair", "radix base"]>
+        || [<uni_nl_no>+ <.unicode_non_digits: ["radix base"]> <?before <[ \[ \( \< \{ ]>>]
         ]
         :my $r := nqp::radix(10, $<radix>, 0, 0)[0];
         {}           # don't recurse in lexer
-        :dba('number in radix notation')
         [
         || '<'
                 $<ohradix> = [ '0x' <?{ $r < 34 }> | '0o' <?{ $r < 25 }> | '0d' <?{ $r < 14 }> | '0b' <?{ $r < 12 }> ]**0..1
                 $<intpart> = [<rad_digits> || <uni_nl_no>+ <.unicode_non_digits>]
-                $<fracpart> = [[ '.' <rad_digits> ]**0..1 || <uni_nl_no>+ <.unicode_non_digits>]
+                $<fracpart> = ['.' [<rad_digits> || <uni_nl_no>+ <.unicode_non_digits>]]**0..1
                 [ '*' <base=.integer> '**' <exp=.integer> ]**0..1
            '>'
         || <?[[]> <bracket=circumfix>
