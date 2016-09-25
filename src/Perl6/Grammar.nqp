@@ -3423,22 +3423,11 @@ grammar Perl6::Grammar is HLL::Grammar does STD {
                 $<ohradix> = [ '0x' <?{ $r < 34 }> | '0o' <?{ $r < 25 }> | '0d' <?{ $r < 14 }> | '0b' <?{ $r < 12 }> ]**0..1
                 $<intpart> = [ [\d | <[ a..z A..Z ａ..ｚ Ａ..Ｚ ]>]+ [ _ [\d | <[ a..z A..Z ａ..ｚ Ａ..Ｚ ]>]+ ]* ]
                 $<fracpart> = [ '.' [\d | <[ a..z A..Z ａ..ｚ Ａ..Ｚ ]>]+ [ _ [\d | <[ a..z A..Z ａ..ｚ Ａ..Ｚ ]>]+ ]* ]**0..1
-                [ '*' <base=.radint> '**' <exp=.radint> ]**0..1
+                [ '*' <base=.integer> '**' <exp=.integer> ]**0..1
            '>'
         || <?[[]> <bracket=circumfix>
         || <?[(]> <circumfix>
         || <.malformed: 'radix number'>
-        ]
-    }
-
-    token radint {
-        [
-        | <integer>
-        # | <?before ':'\d> <rad_number> <?{
-        #                         defined $<rad_number><intpart>
-        #                         and
-        #                         not defined $<rad_number><fracpart>
-        #                     }>
         ]
     }
 

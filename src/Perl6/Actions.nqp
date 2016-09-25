@@ -7280,11 +7280,6 @@ class Perl6::Actions is HLL::Actions does STDActions {
         }
     }
 
-    method radint($/) {
-        # XXX fix this when fixing its grammar side
-        make $<integer>.ast;
-    }
-
     method complex_number($/) { make $<bare_complex_number>.ast }
 
     method rat_number($/) { make $<bare_rat_number>.ast }
