@@ -272,6 +272,9 @@ role STD {
     method malformed($what) {
         self.typed_panic('X::Syntax::Malformed', :$what);
     }
+    method unicode_non_digits($expected?) {
+        self.typed_panic('X::Comp::AdHoc', payload => "Only 'Nd' digits are allowed here, not 'No' or 'Nl' numbers", :$expected);
+    }
     method missing_block($borg, $has_mystery) {
         my $marked := self.MARKED('ws');
         my $pos := $marked ?? $marked.from !! self.pos;
@@ -3409,11 +3412,23 @@ grammar Perl6::Grammar is HLL::Grammar does STD {
         [ <?before '_' '_'+\d> <.sorry: "Only isolated underscores are allowed inside numbers"> ]?
     }
 
+    token rad_digit {
+        \d | <[ a..z A..Z ａ..ｚ Ａ..Ｚ ]>
+    }
+
+    token rad_digits {
+        <rad_digit>+ [ _ <rad_digit>+ ]*
+    }
+
+    tokwn uni_nl_no {
+        <:Nl+:No>
+    }
+
     token rad_number {
         ':' $<radix> =
         [
-        || [\d+] <.unsp>?
-        || <:No+:Nl>+ {$/.CURSOR.typed_panic('X::Comp::AdHoc', payload => "Only 'Nd' digits are allowed, not 'No' or 'Nl' numbers", expected => ["colon pair", "radix base"])}
+        || \d+ <.unsp>?
+        || <uni_nl_no>+ <.unicode_non_digits: ["colon pair", "radix base"]>
         ]
         :my $r := nqp::radix(10, $<radix>, 0, 0)[0];
         {}           # don't recurse in lexer
@@ -3421,8 +3436,8 @@ grammar Perl6::Grammar is HLL::Grammar does STD {
         [
         || '<'
                 $<ohradix> = [ '0x' <?{ $r < 34 }> | '0o' <?{ $r < 25 }> | '0d' <?{ $r < 14 }> | '0b' <?{ $r < 12 }> ]**0..1
-                $<intpart> = [ [\d | <[ a..z A..Z ａ..ｚ Ａ..Ｚ ]>]+ [ _ [\d | <[ a..z A..Z ａ..ｚ Ａ..Ｚ ]>]+ ]* ]
-                $<fracpart> = [ '.' [\d | <[ a..z A..Z ａ..ｚ Ａ..Ｚ ]>]+ [ _ [\d | <[ a..z A..Z ａ..ｚ Ａ..Ｚ ]>]+ ]* ]**0..1
+                $<intpart> = [<rad_digits> || <uni_nl_no>+ <.unicode_non_digits>]
+                $<fracpart> = [[ '.' <rad_digits> ]**0..1 || <uni_nl_no>+ <.unicode_non_digits>]
                 [ '*' <base=.integer> '**' <exp=.integer> ]**0..1
            '>'
         || <?[[]> <bracket=circumfix>
