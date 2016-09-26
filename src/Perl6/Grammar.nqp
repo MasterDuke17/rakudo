@@ -3417,7 +3417,7 @@ grammar Perl6::Grammar is HLL::Grammar does STD {
     }
 
     token rad_digits {
-        <rad_digit>+ [ _ <rad_digit>+ ]*
+        <rad_digit>+ [ _ <rad_digit>+ ]*] || [<uni_nl_no>+ <.unicode_non_digits>
     }
 
     token uni_nl_no {
@@ -3425,7 +3425,6 @@ grammar Perl6::Grammar is HLL::Grammar does STD {
     }
 
     token rad_number {
-        :dba('number in radix notation')
         ':' $<radix> =
         [
         || \d+ <.unsp>?
@@ -3433,15 +3432,17 @@ grammar Perl6::Grammar is HLL::Grammar does STD {
         ]
         :my $r := nqp::radix(10, $<radix>, 0, 0)[0];
         {}           # don't recurse in lexer
+        :dba('number in radix notation')
         [
         || '<'
                 $<ohradix> = [ '0x' <?{ $r < 34 }> | '0o' <?{ $r < 25 }> | '0d' <?{ $r < 14 }> | '0b' <?{ $r < 12 }> ]**0..1
-                $<intpart> = [<rad_digits> || <uni_nl_no>+ <.unicode_non_digits>]
-                $<fracpart> = ['.' [<rad_digits> || <uni_nl_no>+ <.unicode_non_digits>]]**0..1
+                $<intpart> = <rad_digits>
+                $<fracpart> = ['.' <rad_digits>]**0..1
                 [ '*' <base=.integer> '**' <exp=.integer> ]**0..1
            '>'
         || <?[[]> <bracket=circumfix>
         || <?[(]> <circumfix>
+        || <uni_nl_no>+ <.unicode_non_digits>
         || <.malformed: 'radix number'>
         ]
     }
