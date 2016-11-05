@@ -461,9 +461,25 @@ class Perl6::World is HLL::World {
 
     has $!record_precompilation_dependencies;
 
+    # Mapping of source files to their line number in gen/moar/m-CORE.setting
+    has @!SOURCE_LINE_NUMBERS;
+
     method BUILD(*%adv) {
         %!code_object_fixup_list := {};
         $!record_precompilation_dependencies := 1;
+        @!SOURCE_LINE_NUMBERS := [];
+    }
+
+    method source_line_numbers() {
+        @!SOURCE_LINE_NUMBERS
+    }
+
+    method add_source_line_number($line_number, $filename) {
+        my $elems := nqp::elems(@!SOURCE_LINE_NUMBERS);
+        if $elems == 0 || !(@!SOURCE_LINE_NUMBERS[$elems - 1] eq $filename) {
+            nqp::push(@!SOURCE_LINE_NUMBERS, $line_number);
+            nqp::push(@!SOURCE_LINE_NUMBERS, $filename);
+        }
     }
 
     method create_nested() {

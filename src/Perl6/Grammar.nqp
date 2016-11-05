@@ -689,6 +689,10 @@ grammar Perl6::Grammar is HLL::Grammar does STD {
         }
     }
 
+    token comment:sym<#line> {
+        ^^ '#line 1 ' $<filename>=[\S+] $$ <?{ nqp::rindex($*W.current_file(), 'gen/moar/m-CORE.setting') >= 0 }>
+    }
+
     method attach_leading_docs() {
         if ~$*DOC ne '' {
             my $cont  := Perl6::Pod::serialize_aos(

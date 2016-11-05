@@ -560,6 +560,10 @@ class Perl6::Actions is HLL::Actions does STDActions {
         @MAX_PERL_VERSION[0] := 6;
     }
 
+    method comment:sym<#line>($/) {
+        $*W.add_source_line_number(+$*W.current_line($/), ~$<filename>)
+    }
+
     sub sink($past) {
         QAST::Want.new(
             $past,
@@ -2557,6 +2561,18 @@ class Perl6::Actions is HLL::Actions does STDActions {
                 $past := QAST::WVal.new( :value($resources) );
                 if nqp::isnull(nqp::getobjsc($resources)) {
                     $*W.add_object($resources);
+                }
+            }
+            else {
+                $past := QAST::WVal.new( :value($*W.find_symbol(['Nil'])) );
+            }
+        }
+        elsif $name eq '@?SOURCE_LINE_NUMBERS' {
+            my @source_line_numbers := $*W.source_line_numbers;
+            if @source_line_numbers {
+                $past := QAST::Op.new( :op('hllize'), QAST::WVal.new( :value(@source_line_numbers) ) );
+                if nqp::isnull(nqp::getobjsc(@source_line_numbers)) {
+                    $*W.add_object(@source_line_numbers);
                 }
             }
             else {
