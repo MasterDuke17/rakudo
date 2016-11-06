@@ -161,9 +161,9 @@ my class Backtrace {
 
             if %*ENV<RAKUDO_BACKTRACE_SETTING> and $file.ends-with('gen/moar/m-CORE.setting') {
                 my @line_numbers_to_filenames := @?SOURCE_LINE_NUMBERS;
-                loop (my int $i = 0; $i < +@line_numbers_to_filenames - 2; $i += 2) {
-                    next unless @line_numbers_to_filenames[$i] < $line < @line_numbers_to_filenames[$i + 2];
-                    $line := $line - @line_numbers_to_filenames[$i] + 3;
+                loop (my int $i = @line_numbers_to_filenames - 2; $i >= 0; $i -= 2) {
+                    next if $line < @line_numbers_to_filenames[$i];
+                    $line := $line - @line_numbers_to_filenames[$i] - 1;
                     $file := @line_numbers_to_filenames[$i + 1];
                     last;
                 }
