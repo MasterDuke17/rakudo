@@ -1262,6 +1262,7 @@ class Perl6::Optimizer {
                     if    $last_op eq 'assign_i' { $op.op('decont_i') }
                     elsif $last_op eq 'assign_n' { $op.op('decont_n') }
                     elsif $last_op eq 'assign_s' { $op.op('decont_s') }
+                    elsif $last_op eq 'assign_u' { $op.op('decont_u') }
                     $op.shift; # The QAST::WVal of the routine
                     return $op;
                 }
@@ -1582,7 +1583,7 @@ class Perl6::Optimizer {
         )
     }
 
-    my @native_assign_ops := ['', 'assign_i', 'assign_n', 'assign_s'];
+    my @native_assign_ops := ['', 'assign_i', 'assign_n', 'assign_s', 'assign_u'];
     method optimize_nameless_call($op) {
         if +@($op) > 0 {
             # if we know we're directly calling the result, we can be smarter

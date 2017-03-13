@@ -6754,7 +6754,7 @@ class Perl6::Actions is HLL::Actions does STDActions {
         }
     }
 
-    my @native_assign_ops := ['', 'assign_i', 'assign_n', 'assign_s'];
+    my @native_assign_ops := ['', 'assign_i', 'assign_n', 'assign_s', 'assign_u'];
     sub assign_op($/, $lhs_ast, $rhs_ast) {
         my $past;
         my $var_sigil;

@@ -27,6 +27,10 @@ static void rakudo_scalar_fetch_s(MVMThreadContext *tc, MVMObject *cont, MVMRegi
     res->s = MVM_repr_get_str(tc, ((Rakudo_Scalar *)cont)->value);
 }
 
+static void rakudo_scalar_fetch_u(MVMThreadContext *tc, MVMObject *cont, MVMRegister *res) {
+    res->u64 = MVM_repr_get_uint(tc, ((Rakudo_Scalar *)cont)->value);
+}
+
 MVMObject * get_nil();
 MVMObject * get_mu();
 
@@ -208,6 +212,14 @@ static void rakudo_scalar_store_s(MVMThreadContext *tc, MVMObject *cont, MVMStri
     rakudo_scalar_store(tc, cont, boxed);
 }
 
+static void rakudo_scalar_store_u(MVMThreadContext *tc, MVMObject *cont, MVMuint64 value) {
+    MVMObject *boxed;
+    MVMROOT(tc, cont, {
+        boxed = MVM_repr_box_uint(tc, MVM_hll_current(tc)->uint_box_type, value);
+    });
+    rakudo_scalar_store(tc, cont, boxed);
+}
+
 static void rakudo_scalar_store_unchecked(MVMThreadContext *tc, MVMObject *cont, MVMObject *obj) {
     finish_store(tc, cont, obj);
 }
@@ -247,10 +259,12 @@ static const MVMContainerSpec rakudo_scalar_spec = {
     rakudo_scalar_fetch_i,
     rakudo_scalar_fetch_n,
     rakudo_scalar_fetch_s,
+    rakudo_scalar_fetch_u,
     rakudo_scalar_store,
     rakudo_scalar_store_i,
     rakudo_scalar_store_n,
     rakudo_scalar_store_s,
+    rakudo_scalar_store_u,
     rakudo_scalar_store_unchecked,
     rakudo_scalar_spesh,
     NULL,
