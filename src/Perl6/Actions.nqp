@@ -6780,6 +6780,9 @@ class Perl6::Actions is HLL::Actions does STDActions {
                 $lhs_ast.node.CURSOR.typed_sorry('X::Assignment::RO::Comp',
                     variable => $lhs_ast.name);
             }
+            if $spec == 1 && nqp::objprimunsigned($lhs_ast.returns) {
+                $spec := 4;
+            }
             $past := QAST::Op.new(
                 :op(@native_assign_ops[$spec]), :returns($lhs_ast.returns),
                 $lhs_ast, $rhs_ast);

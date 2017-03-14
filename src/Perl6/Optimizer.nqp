@@ -1608,6 +1608,9 @@ class Perl6::Optimizer {
                                 my str $sigil := nqp::substr($op[1].name, 0, 1);
 
                                 if nqp::objprimspec($op[1].returns) -> $spec {
+                                    if $spec == 1 && nqp::objprimunsigned($op[1].returns) {
+                                        $spec := 4;
+                                    }
                                     $assignop := @native_assign_ops[$spec];
                                     $is-always-definite := 1;
                                 } elsif $sigil eq '$' {
