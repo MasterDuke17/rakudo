@@ -59,8 +59,13 @@ role Perl6::Metamodel::BUILDPLAN {
                     my $name      := nqp::substr($attr_name, 2);
                     my $typespec  := nqp::objprimspec($_.type);
                     if $typespec {
-                        @plan[+@plan] := [nqp::add_i(4, $typespec),
-                                              $obj, $name, $attr_name];
+                        if $typespec == 1 && nqp::objprimunsigned($_.type) {
+                            @plan[+@plan] := [99, $obj, $name, $attr_name];
+                        }
+                        else {
+                            @plan[+@plan] := [nqp::add_i(4, $typespec),
+                                                  $obj, $name, $attr_name];
+                        }
                     } else {
                         @plan[+@plan] := [1, $obj, $name, $attr_name];
                     }

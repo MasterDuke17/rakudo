@@ -216,6 +216,23 @@ my class Mu { # declared in BOOTSTRAP
                         )
                       ),
 
+                    nqp::if( # 99
+                      nqp::iseq_i($code,99),
+                      nqp::if(
+                        nqp::existskey($init,nqp::atpos($task,2)),
+                        nqp::if(
+                          %attrinit.AT-KEY(nqp::p6box_s(nqp::atpos($task,2))) < 0,
+                          nqp::die("native unsigned integers can't be negative"),
+                          nqp::bindattr_u(self,
+                            nqp::atpos($task,1),
+                            nqp::atpos($task,3),
+                            nqp::decont(%attrinit.AT-KEY(
+                              nqp::p6box_s(nqp::atpos($task,2))
+                            ))
+                          )
+                        )
+                      ),
+
                       nqp::if( # 6
                         nqp::iseq_i($code,6),
                         nqp::if(
@@ -309,7 +326,7 @@ my class Mu { # declared in BOOTSTRAP
                                     nqp::isne_i($code,13),  # no-op
                                     die("Invalid BUILDALL plan")
                                   )
-        ))))))))))))));
+                              )))))))))))))));
         self
     }
 
@@ -402,6 +419,20 @@ my class Mu { # declared in BOOTSTRAP
                         )
                       ),
 
+                    nqp::if( # 99
+                      nqp::iseq_i($code,99),
+                      nqp::stmts(nqp::sayfh(nqp::getstderr, "99"),
+                      nqp::if(
+                        nqp::existskey($init,nqp::atpos($task,2)),
+                        nqp::bindattr_u(self,
+                          nqp::atpos($task,1),
+                          nqp::atpos($task,3),
+                          nqp::decont(%attrinit.AT-KEY(
+                            nqp::p6box_s(nqp::atpos($task,2))
+                          ))
+                        )
+                      )),
+
                       nqp::if( # 6
                         nqp::iseq_i($code,6),
                         nqp::if(
@@ -436,7 +467,7 @@ my class Mu { # declared in BOOTSTRAP
                             ),
                             die("Invalid BUILD_LEAST_DERIVED plan")
                           )
-        )))))))));
+        ))))))))));
         self
     }
 
