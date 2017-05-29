@@ -892,6 +892,31 @@ my class X::Signature::Placeholder does X::Comp {
     }
 }
 
+my class X::Signature::WrongArity is Exception {
+    has Bool $.too_many;
+    has $.expected;
+    has $.got;
+    has Bool $.is_sub-signature is rw;
+    has $.parameter is rw;
+
+    method is_sub-signature(Bool() $is_sub-signature) {
+        $!is_sub-signature = $is_sub-signature;
+    }
+
+    method parameter($parameter) {
+        $!parameter = $parameter;
+    }
+
+    method message() {
+        my str $s = $!expected == 1 ?? "" !! "s";
+        my $message = $!too_many ?? "Too many" !! "Too few";
+        $message ~= " positionals passed; expected $!expected argument$s but got $!got";
+        $message ~= " in sub-signature" if $!is_sub-signature;
+        $message ~= " of parameter $!parameter" if $!parameter;
+        $message;
+    }
+}
+
 my class X::Placeholder::Block does X::Comp {
     has $.placeholder;
     method message() {
@@ -2575,6 +2600,10 @@ nqp::bindcurhllsym('P6EX', BEGIN nqp::hash(
   'X::NYI',
   -> $feature {
       X::NYI.new(:$feature).throw;
+  },
+  'X::Signature::WrongArity',
+  -> Bool() $too_many, $expected, $got, Bool() $is_sub-signature, $parameter {
+      X::Signature::WrongArity.new(:$too_many, :$expected, :$got, :$is_sub-signature, :$parameter);
   },
 ));
 

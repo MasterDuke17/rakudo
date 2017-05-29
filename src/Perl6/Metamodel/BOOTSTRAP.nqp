@@ -167,9 +167,19 @@ my class Binder {
         my str $s := $arity == 1 ?? "" !! "s";
 
         if $arity == $count {
-            return "$error_prefix positionals passed; expected $arity argument$s but got $num_pos_args";
+            my %ex := nqp::gethllsym('perl6', 'P6EX');
+            if nqp::isnull(%ex) || !nqp::existskey(%ex, 'X::Signature::WrongArity') {
+                return "$error_prefix positionals passed; expected $arity argument$s but got $num_pos_args";
+            } else {
+                return nqp::atkey(%ex, 'X::Signature::WrongArity')($too_many, $arity, $num_pos_args, 0, 0);
+            }
         } elsif $count < 0 {
-            return "$error_prefix positionals passed; expected at least $arity argument$s but got only $num_pos_args";
+            my %ex := nqp::gethllsym('perl6', 'P6EX');
+            if nqp::isnull(%ex) || !nqp::existskey(%ex, 'X::Signature::WrongArity') {
+                return "$error_prefix positionals passed; expected at least $arity argument$s but got only $num_pos_args";
+            } else {
+                return nqp::atkey(%ex, 'X::Signature::WrongArity')($too_many, $arity, $num_pos_args, 0, 0);
+            }
         } else {
             my str $conj := $count == $arity+1 ?? "or" !! "to";
             return "$error_prefix positionals passed; expected $arity $conj $count arguments but got $num_pos_args";
@@ -587,11 +597,21 @@ my class Binder {
             my $result := bind(make_vm_capture($capture), $subsig, $lexpad,
                 $no_nom_type_check, $error);
             unless $result == $BIND_RESULT_OK {
-                if $error && nqp::isstr($error[0]) {
-                    # Note in the error message that we're in a sub-signature.
-                    $error[0] := $error[0] ~ " in sub-signature";
-                    if $has_varname {
-                        $error[0] := $error[0] ~ " of parameter " ~ $varname;
+                if $error {
+                    my %ex := nqp::gethllsym('perl6', 'P6EX');
+                    if nqp::isnull(%ex) || !nqp::existskey(%ex, 'X::Signature::WrongArity') || nqp::isstr($error[0]) {
+                        # Note in the error message that we're in a sub-signature.
+                        $error[0] := $error[0] ~ " in sub-signature";
+                        if $has_varname {
+                            $error[0] := $error[0] ~ " of parameter " ~ $varname;
+                        }
+                    }
+                    else {
+                        $error[0].is_sub-signature(1);
+                        if $has_varname {
+                            $error[0].parameter($varname);
+                        }
+                        $error[0].throw
                     }
                 }
                 return $result;
