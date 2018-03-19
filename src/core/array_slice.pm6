@@ -22,38 +22,6 @@ multi sub POSITIONS(
       )
   }
 ) {
-    my class IndicesReificationTarget {
-        has $!target;
-        has $!star;
-
-        method new(\target, \star) {
-            my \rt = nqp::create(self);
-            nqp::bindattr(rt, self, '$!target', target);
-            nqp::bindattr(rt, self, '$!star', star);
-            rt
-        }
-
-        method push(Mu \value) {
-            nqp::if(
-              nqp::istype(value,Callable),
-              nqp::stmts(
-                nqp::if(
-                  nqp::istype($!star,Callable),
-                  nqp::bindattr(self,IndicesReificationTarget,'$!star',$!star(*))
-                ),
-                # just using value(...) causes stage optimize to die
-                (my &whatever := value),
-                nqp::if(
-                  &whatever.count == Inf,
-                  nqp::push($!target, whatever(+$!star)),
-                  nqp::push($!target, whatever(|(+$!star xx &whatever.count)))
-                )
-              ),
-              nqp::push($!target,value)
-            )
-        }
-    }
-
     # we can optimize `42..*` Ranges; as long as they're from core, unmodified
     my \is-pos-lazy = pos.is-lazy;
     my \pos-iter    = nqp::eqaddr(pos.WHAT,Range)
@@ -67,7 +35,6 @@ multi sub POSITIONS(
 
     my \pos-list = nqp::create(List);
     my \eager-indices = nqp::create(IterationBuffer);
-    my \target = IndicesReificationTarget.new(eager-indices, $eagerize);
     nqp::bindattr(pos-list, List, '$!reified', eager-indices);
 
     if is-pos-lazy {
@@ -86,7 +53,40 @@ multi sub POSITIONS(
         nqp::bindattr(pos-list, List, '$!todo', todo);
     }
     else {
-        pos-iter.push-all: target;
+        my class IndicesReificationTarget {
+            has $!target;
+            has $!star;
+
+            method new(\target, \star) {
+                my \rt = nqp::create(self);
+                nqp::bindattr(rt, self, '$!target', target);
+                nqp::bindattr(rt, self, '$!star', star);
+                rt
+            }
+
+            multi method push(Mu \value) {
+                nqp::push($!target,value)
+            }
+
+            multi method push(Callable \value) {
+                note("IndicesReificationTarget.push with Callable");
+                nqp::stmts(
+                  nqp::if(
+                    nqp::istype($!star,Callable),
+                    nqp::bindattr(self,IndicesReificationTarget,'$!star',$!star(*))
+                  ),
+                  # just using value(...) causes stage optimize to die
+                  (my &whatever := value),
+                  nqp::if(
+                    &whatever.count == Inf,
+                    nqp::push($!target, whatever(+$!star)),
+                    nqp::push($!target, whatever(|(+$!star xx &whatever.count)))
+                  )
+                )
+            }
+        }
+
+        pos-iter.push-all: IndicesReificationTarget.new(eager-indices, $eagerize);
     }
     pos-list
 }
