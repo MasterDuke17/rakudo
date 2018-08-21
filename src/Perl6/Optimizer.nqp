@@ -1109,6 +1109,31 @@ class Perl6::Optimizer {
             return self.visit_children($op,:first);
         }
 
+        # If it's for ^100 + 1 { } we can simplify it to for 1..^101. We
+        # check this here, before the tree is transformed by call inline opts.
+        if ($optype eq 'p6for' || $optype eq 'p6forstmt') && $op.sunk && @($op) == 2 {
+            my $theop := $op[0];
+            if nqp::istype($theop, QAST::Stmts) { $theop := $theop[0] }
+
+            if nqp::istype($theop, QAST::Op)
+              && $theop.op eq 'call'
+              && $theop.name eq '&infix:<+>'
+              && $!symbols.is_from_core($theop.name)
+              && $op[1].has_ann('code_object') {
+                my $rangeop := $theop[0];
+                if nqp::istype($rangeop, QAST::Stmts) { $rangeop := $rangeop[0] }
+
+                if nqp::istype($rangeop, QAST::Op)
+                  && !nqp::istype($theop[1], QAST::Op)
+                  && nqp::existskey(%range_bounds, $rangeop.name)
+                  && $!symbols.is_from_core($rangeop.name) {
+                    self.optimize_for_range($op, $op[1], $theop);
+                    self.visit_op_children($op);
+                    return $op;
+                }
+            }
+        }
+
         # If it's a for 1..1000000 { } we can simplify it to a while loop. We
         # check this here, before the tree is transformed by call inline opts.
         if ($optype eq 'p6for' || $optype eq 'p6forstmt') && $op.sunk && @($op) == 2 {
