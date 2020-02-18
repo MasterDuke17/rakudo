@@ -2973,19 +2973,19 @@ class Perl6::Optimizer {
             (my $symJunction := $!symbols.find_symbol: ['Junction']))
         && nqp::getattr($j, $symJunction, '$!type') eq 'any'
         {
-            my @types := nqp::getattr($j, $symJunction, '$!eigenstates');
-            return NQPMu if nqp::isconcrete($_) for @types;
-
             my $op := my $qast := QAST::Stmts.new;
-            for @types {
-                $op.push: my $new-op := QAST::Op.new: :op<unless>,
-                    QAST::Op.new: :op<istype>, $param-var,
-                      QAST::WVal.new: :value($_);
+            for nqp::getattr($j, $symJunction, '$!eigenstates') {
+                $op.push: my $new-op :=
+                    QAST::Op.new( :op<if>,
+                        QAST::Op.new( :op<callmethod>, :name<ACCEPTS>,
+                            QAST::WVal.new( :value($_) ),
+                            $param-var),
+                        QAST::WVal.new( :value($!symbols.find_symbol(['True'])) ));
                 $op := $new-op;
             }
-            # rewrite last `unless` into `istype` in the second branch of
-            # parent `unless` (or just the top node, if we only got one WVal)
-            $op.op: 'istype'; $op.push: $op[0][1]; $op[0] := $op[0][0];
+
+            # Add an explicit False as the very end of the .ACCEPTS chain
+            $op.push: QAST::WVal.new( :value($!symbols.find_symbol(['False'])) );
             $qast := $qast[0]; # toss Stmts, we no longer need 'em;
 
             if $node.has_ann('no-autothread') {
