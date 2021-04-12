@@ -415,6 +415,17 @@ multi sub infix:<%%>(uint $a, uint $b --> Bool:D) {
     nqp::hllbool(nqp::iseq_i(nqp::mod_i($a, $b), 0))
 }
 
+multi sub infix:<**>(Int:D \a, Int:D \b --> Real:D) {
+    my $power := nqp::pow_I(nqp::decont(a), nqp::decont(b), Num, Int);
+    # when a**b is too big nqp::pow_I returns Inf
+    nqp::istype($power, Num) && nqp::isnanorinf($power)
+        ?? Failure.new(
+            b >= 0 ?? X::Numeric::Overflow.new !! X::Numeric::Underflow.new
+        ) !! b >= 0 ?? $power
+            !! $power == 0 && a != 0
+                ?? Failure.new(X::Numeric::Underflow.new)
+                    !! $power.Rat(1e-15);
+}
 multi sub infix:<**>(Int:D $a, Int:D $b --> Real:D) {
     nqp::isge_I($b,0) ?? $a.power-up($b) !! $a.power-down($b)
 }
