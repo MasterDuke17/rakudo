@@ -271,38 +271,21 @@ multi sub infix:<**>(Rational:D $a, Int:D $b) {
     my $nu;
     my $de;
     nqp::if(
-      nqp::isge_I($b,0),
-      nqp::if( # if we got Inf
-        nqp::istype(
-          ($nu := nqp::pow_I($a.numerator,$b,Num,Int)),
-          Num
-        ),
-        X::Numeric::Overflow.new.Failure,
-        nqp::if( # if we got Inf
-          nqp::istype(
-            ($de := nqp::pow_I($a.denominator,$b,Num,Int)),
-            Num
-          ),
-          X::Numeric::Overflow.new.Failure,
-          CREATE_RATIONAL_FROM_INTS($nu, $de, $a, $b)
-        )
-      ),
-      nqp::if( # if we got Inf
-        nqp::istype(
-          ($nu := nqp::pow_I($a.numerator,nqp::neg_I($b,Int),Num,Int)),
-          Num
-        ),
-        X::Numeric::Underflow.new.Failure,
-        nqp::if( # if we got Inf
-          nqp::istype(
-            ($de := nqp::pow_I($a.denominator,nqp::neg_I($b,Int),Num,Int)),
-            Num
-          ),
-          X::Numeric::Underflow.new.Failure,
-          CREATE_RATIONAL_FROM_INTS($de, $nu, $a, $b)
-        )
-      )
-    )
+      nqp::isge_I(nqp::decont(b), 0),
+        nqp::if(
+          nqp::isconcrete(($nu := nqp::pow2_I(a.numerator, nqp::decont(b), Int))),
+            nqp::if(
+              nqp::isconcrete(($de := nqp::pow2_I(a.denominator, nqp::decont(b), Int))),
+                CREATE_RATIONAL_FROM_INTS($nu, $de, a, b),
+                Failure.new(X::Numeric::Overflow.new)), # if we got (Int)
+              Failure.new(X::Numeric::Overflow.new)), # if we got (Int)
+        nqp::if(
+          nqp::isconcrete(($nu := nqp::pow2_I(a.numerator, nqp::neg_I(nqp::decont(b), Int), Int))),
+            nqp::if(
+              nqp::isconcrete(($de := nqp::pow2_I(a.denominator, nqp::neg_I(nqp::decont(b), Int), Int))),
+                CREATE_RATIONAL_FROM_INTS($de, $nu, a, b),
+                Failure.new(X::Numeric::Underflow.new)), # if we got (Int)
+              Failure.new(X::Numeric::Underflow.new))) # if we got (Int)
 }
 
 multi sub infix:<==>(Rational:D $a, Rational:D $b --> Bool:D) {
