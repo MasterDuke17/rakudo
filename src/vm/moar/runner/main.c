@@ -77,19 +77,14 @@ static int parse_flag(const char *arg)
 
 int file_exists(const char *path) {
 #ifdef _WIN32
-    int             res;
     struct _stat    sb;
     const int       len   = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
-    wchar_t * const wpath = (wchar_t *)malloc(len * sizeof(wchar_t));
+    wchar_t * const wpath = (wchar_t *)alloca(len * sizeof(wchar_t));
     MultiByteToWideChar(CP_UTF8, 0, path, -1, (LPWSTR)wpath, len);
-    res = _wstat(wpath, &sb);
-    MVM_free(wpath);
-    return res == 0;
+    return _wstat(wpath, &sb) == 0;
 #else
-    struct stat *sb = malloc(sizeof(struct stat));
-    int res         = stat(path, sb) == 0;
-    free(sb);
-    return res;
+    struct stat sb;
+    return stat(path, &sb) == 0;
 #endif
 }
 
@@ -117,7 +112,7 @@ int retrieve_home(
           char   *options_home
 ) {
     char   *check_file_path;
-    size_t  home_size;
+    size_t  home_size, file_path_size;
     int     ret;
     char   *env_home         = getenv(env_var);
 
@@ -150,12 +145,12 @@ int retrieve_home(
         platformify_path(*out_home + exec_dir_path_size);
     }
 
-    check_file_path = (char*)malloc(home_size + check_file_size + 1);
+    file_path_size = home_size + check_file_size + 1;
+        check_file_path = (char*)alloca(file_path_size);
     strncpy(check_file_path, *out_home, home_size + check_file_size);
     strncat(check_file_path, check_file, check_file_size);
 
     ret = file_exists(check_file_path);
-    free(check_file_path);
     return ret;
 }
 
@@ -364,12 +359,12 @@ int main(int argc, char *argv[]) {
 #endif
 
     /* The +1 is the trailing \0 terminating the string. */
-    exec_dir_path_temp = (char*)malloc(exec_path_size + 1);
+        exec_dir_path_temp = (char*)alloca(exec_path_size + 1);
     memcpy(exec_dir_path_temp, exec_path, exec_path_size + 1);
 #ifdef _WIN32
     PathRemoveFileSpecA(exec_dir_path_temp);
     exec_dir_path_size = strlen(exec_dir_path_temp);
-    exec_dir_path      = (char*)malloc(exec_dir_path_size + 1);
+        exec_dir_path = (char*)alloca(exec_dir_path_size + 1);
     memcpy(exec_dir_path, exec_dir_path_temp, exec_dir_path_size + 1);
 #else
     exec_dir_path      = dirname(exec_dir_path_temp);
@@ -415,10 +410,10 @@ int main(int argc, char *argv[]) {
 
     /* Put together the lib paths and perl6_file path. */
 
-    lib_path[0] = (char*)malloc(nqp_home_size   + 50);
-    lib_path[1] = (char*)malloc(rakudo_home_size + 50);
-    lib_path[2] = (char*)malloc(rakudo_home_size + 50);
-    perl6_file  = (char*)malloc(rakudo_home_size + 50);
+        lib_path[0] = (char*)alloca(nqp_home_size   + 50);
+        lib_path[1] = (char*)alloca(rakudo_home_size + 50);
+        lib_path[2] = (char*)alloca(rakudo_home_size + 50);
+        perl6_file  = (char*)alloca(rakudo_home_size + 50);
 
     memcpy(lib_path[0], nqp_home,     nqp_home_size);
     memcpy(lib_path[1], rakudo_home, rakudo_home_size);
@@ -480,10 +475,6 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
-    free(lib_path[0]);
-    free(lib_path[1]);
-    free(lib_path[2]);
-    free(perl6_file);
 #ifndef STATIC_EXEC_PATH
     free(exec_path);
 #endif
@@ -491,9 +482,7 @@ int main(int argc, char *argv[]) {
     /* dirname's return value is either on the stack or is the same pointer
      * that was passed to it depending on the version of libc used, which leads
      * to double frees. */
-    free(exec_dir_path);
 #endif
-    free(exec_dir_path_temp);
 #ifndef STATIC_RAKUDO_HOME
     free(rakudo_home);
 #else
