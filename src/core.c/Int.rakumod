@@ -275,17 +275,16 @@ my class Int does Real { # declared in BOOTSTRAP
     }
 
     method power-up(Int:D $b) is implementation-detail {
-        # when a**b is too big nqp::pow_I returns Inf
-        nqp::istype((my $power := nqp::pow_I(self,$b,Num,Int)),Int)
+        # when a**b is too big nqp::pow2_I returns Int
+        nqp::isconcrete((my $power := nqp::pow2_I(self,$b,Int)))
           ?? $power
           !! X::Numeric::Overflow.new.Failure
     }
 
     method power-down(Int:D $b) is implementation-detail {
-        # when a**b is too big nqp::pow_I returns Inf
-        nqp::istype(
-          (my $power := nqp::pow_I(self,nqp::neg_I($b,Int),Num,Int)),
-          Num
+        # when a**b is too big nqp::pow2_I returns Int
+        !nqp::isconcrete(
+          (my $power := nqp::pow2_I(self,nqp::neg_I($b,Int),Int))
         ) || (nqp::istype(
                ($power := CREATE_RATIONAL_FROM_INTS(1, $power, Int, Int)),
                Num
@@ -415,24 +414,6 @@ multi sub infix:<%%>(uint $a, uint $b --> Bool:D) {
     nqp::hllbool(nqp::iseq_i(nqp::mod_i($a, $b), 0))
 }
 
-my constant UINT64_UPPER = nqp::pow2_I(2, 64, Int);
-
-multi sub infix:<**>(Int:D $a, Int:D $b --> Real:D) {
-    # when a**b is too big nqp::pow2_I returns (Int)
-    nqp::isconcrete((my $power := nqp::pow2_I($a, $b, Int)))
-      ?? nqp::isge_I($b, 0)
-        ?? $power
-        !! nqp::islt_I($power, UINT64_UPPER) || nqp::iseq_I($a, 0)
-          ?? 1 / $power
-          !! POW_FAIL(0)
-      !! nqp::isge_I($b, 0)
-        ?? POW_FAIL(1)
-        !! POW_FAIL(0)
-}
-
-sub POW_FAIL(Int:D \b --> Failure:D) is implementation-detail {
-    Failure.new(b ?? X::Numeric::Overflow.new !! X::Numeric::Underflow.new)
-}
 multi sub infix:<**>(Int:D $a, Int:D $b --> Real:D) {
     nqp::isge_I($b,0) ?? $a.power-up($b) !! $a.power-down($b)
 }
