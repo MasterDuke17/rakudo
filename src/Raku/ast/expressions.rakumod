@@ -1992,7 +1992,7 @@ class RakuAST::ApplyInfix
         while nqp::isconcrete($!args.arg-at-pos($i)) {
             @colonpairs.push($!args.arg-at-pos($i++));
         }
-        @colonpairs
+        self.IMPL-WRAP-LIST(@colonpairs)
     }
 
     method operands() { $!args.IMPL-UNWRAP-LIST($!args.args) }

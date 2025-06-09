@@ -158,7 +158,7 @@ class RakuAST::Package
         nqp::bindattr(self, RakuAST::Package, '$!compiler-services', RakuAST::CompilerServices.new(self, $resolver, $context));
     }
 
-    method attach-target-names() { ['package', 'also'] }
+    method attach-target-names() { self.IMPL-WRAP-LIST(['package', 'also']) }
 
     method IMPL-GENERATE-LEXICAL-DECLARATION(RakuAST::Name $name, Mu $type-object) {
         $type-object := self.stubbed-meta-object if nqp::eqaddr($type-object, Mu);

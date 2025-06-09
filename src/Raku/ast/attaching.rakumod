@@ -27,7 +27,7 @@ class RakuAST::Declaration::External::Package
   is RakuAST::AttachTarget
 {
     method attach-target-names() {
-        ['package']
+        self.IMPL-WRAP-LIST(['package'])
     }
 
     method clear-attachments() {

@@ -29,7 +29,7 @@ class RakuAST::Label
 
     method default-scope() { 'my' }
 
-    method allowed-scopes() { ['my'] }
+    method allowed-scopes() { self.IMPL-WRAP-LIST(['my']) }
 
     method lexical-name() { $!name }
 

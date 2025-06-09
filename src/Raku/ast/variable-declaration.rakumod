@@ -2613,7 +2613,7 @@ class RakuAST::VarDeclaration::Placeholder
 
     method default-scope() { 'my' }
 
-    method allowed-scopes() { ['my'] }
+    method allowed-scopes() { self.IMPL-WRAP-LIST(['my']) }
 
     method generate-lookup() {
         my $lookup := RakuAST::Var::Lexical.new(self.lexical-name);

@@ -493,7 +493,7 @@ class RakuAST::StatementPrefix::Wheneverable
     }
 
     method attach-target-names() {
-        ['wheneverable']
+        self.IMPL-WRAP-LIST(['wheneverable'])
     }
 
     method IMPL-WHENEVER-COUNT() {
