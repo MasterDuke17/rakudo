@@ -267,7 +267,7 @@ class RakuAST::Package
     # Need to install the package somewhere
     method install-in-scope(RakuAST::Resolver $resolver, str $scope, RakuAST::Name $name, RakuAST::Name $full-name) {
         self.IMPL-INSTALL-PACKAGE(
-          $resolver, $scope, $name, $resolver.current-package, :meta-object(Mu)
+          $resolver, $scope, $full-name, $resolver.current-package, :meta-object(Mu)
         ) if $scope eq 'my' || $scope eq 'our';
     }
 
@@ -588,7 +588,7 @@ class RakuAST::Role
               :name($group-name), :repr(self.repr)
             );
             self.IMPL-INSTALL-PACKAGE(
-              $resolver, $scope, $name, $resolver.current-package,
+              $resolver, $scope, $full-name, $resolver.current-package,
               :meta-object($group),
             );
         }

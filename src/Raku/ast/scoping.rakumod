@@ -619,6 +619,14 @@ class RakuAST::Declaration::External
         $lookup.set-resolution(self);
         $lookup
     }
+
+    method has-compile-time-value() {
+        $!maybe-compile-time-value ?? True !! False
+    }
+
+    method compile-time-value() {
+        $!maybe-compile-time-value
+    }
 }
 
 class RakuAST::Declaration::Mergeable {
@@ -760,6 +768,14 @@ class RakuAST::Declaration::External::Setting
     }
 
     method return-type() { $!compile-time-value.WHAT }
+
+    method has-compile-time-value() {
+        True
+    }
+
+    method maybe-compile-time-value() {
+        self.compile-time-value
+    }
 }
 
 # An imported lexical declaration. Has a compile-time value. Must create a

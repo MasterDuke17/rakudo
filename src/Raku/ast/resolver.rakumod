@@ -217,17 +217,58 @@ class RakuAST::Resolver {
 # it being passed as an argument then???   XXX
 #        $name := $sigil ~ $name if $sigil;
 
-        for $!packages {
-            my $stash := self.IMPL-STASH-HASH($_.compile-time-value);
-            return $partial
-                ?? ($stash{$name}, List.new, 'global')
-                !! self.external-constant($stash, $name)
-                if nqp::existskey($stash,$name);
-        }
+        my @parts := nqp::clone($Rname.IMPL-UNWRAP-LIST($Rname.parts));
+	my $first := nqp::shift(@parts);
+        my $fname := nqp::istype($first,RakuAST::Name::Part::Simple) ?? $first.name !! '';
+	my $packages := nqp::clone($!packages);
+	nqp::unshift($packages, $!global);
+	while $packages {
+		my $package := nqp::pop($packages);
+		#nqp::note("package: " ~ $package.HOW.name($package));
+	        my $stash := self.IMPL-STASH-HASH(nqp::can($package, 'compile-time-value') ?? $package.compile-time-value !! $package);
+		if nqp::existskey($stash, $fname) {
+			my $cur-package := $stash{$fname};
+			#$symbol := $cur;
+			while @parts {
+				my $part := nqp::shift(@parts);
+				my $pname := nqp::istype($part,RakuAST::Name::Part::Simple) ?? $part.name !! '';
+				my $next-package := nqp::atkey(self.IMPL-STASH-HASH($cur-package), $pname);
+				if nqp::isnull($next-package) {
+					nqp::unshift(@parts, $part);
+					return $partial
+						?? ($next-package, $Rname.IMPL-WRAP-LIST(@parts), 'global')
+						!! Nil
+				}
+				$cur-package := $next-package;
+			}
+			return $partial
+				?? ($cur-package, List.new, 'global')
+				!! RakuAST::Declaration::External::Constant.new(
+                    			lexical-name => $name, compile-time-value => $cur-package
+		                   );
+		}
+	}
+	return Nil;
+	#for @parts {
+        #    my $pname    := nqp::istype($_,RakuAST::Name::Part::Simple)
+        #      ?? $_.name
+        #      !! '';
+	#    for $!packages {
+	#	    #nqp::note($_.DUMP);
+	#    	if !$_.has-compile-time-value {
+	#		# XXX should throw
+	#		last;
+	#    	}
+	#        my $stash := self.IMPL-STASH-HASH($_.compile-time-value);
+	#        return $partial
+	#            ?? ($stash{$pname}, List.new, 'global')
+	#            !! self.external-constant($stash, $pname)
+	#            if nqp::existskey($stash,$pname);
+	#    }
+	#}
 
         my $symbol := $!global;
-        my @parts := nqp::clone($Rname.IMPL-UNWRAP-LIST($Rname.parts));
-        while @parts {
+	while @parts {
             my $part := @parts.shift;
             $name    := nqp::istype($part,RakuAST::Name::Part::Simple)
               ?? $part.name
@@ -981,7 +1022,9 @@ class RakuAST::Resolver::Compile
         nqp::bindattr($obj, RakuAST::Resolver, '$!outer', $outer);
         nqp::bindattr($obj, RakuAST::Resolver, '$!attach-targets', $attach-targets // nqp::hash());
         nqp::bindattr($obj, RakuAST::Resolver, '$!global', $global);
-        nqp::bindattr($obj, RakuAST::Resolver, '$!packages', []);
+        my $cur-package := $obj.resolve-lexical-constant-in-outer('$?PACKAGE');
+        nqp::bindattr($obj, RakuAST::Resolver, '$!packages',
+            $cur-package ?? [$cur-package] !! []);
 
         nqp::bindattr($obj, RakuAST::Resolver::Compile, '$!scopes',
           $scopes // []);
