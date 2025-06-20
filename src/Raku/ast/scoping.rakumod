@@ -627,6 +627,10 @@ class RakuAST::Declaration::External
     method compile-time-value() {
         $!maybe-compile-time-value
     }
+
+    method meta-object() {
+        self.compile-time-value
+    }
 }
 
 class RakuAST::Declaration::Mergeable {
