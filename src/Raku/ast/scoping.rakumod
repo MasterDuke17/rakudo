@@ -24,12 +24,21 @@ class RakuAST::LexicalScope
     has Bool $.tell-worries;
     has Bool $.soft;
 
+    # Set by `try` to throw (and then catch) Failures produced in this scope,
+    # the runtime half of `use fatal`, without the compile-time half that turns
+    # worries into sorries. `use fatal` sets $!fatal, which does both.
+    has Bool $.fatalize-failures;
+
     method set-fatal(Bool $on) {
         nqp::bindattr(self, RakuAST::LexicalScope, '$!fatal', $on);
     }
 
     method set-soft(Bool $on) {
         nqp::bindattr(self, RakuAST::LexicalScope, '$!soft', $on);
+    }
+
+    method set-fatalize-failures(Bool $on) {
+        nqp::bindattr(self, RakuAST::LexicalScope, '$!fatalize-failures', $on);
     }
 
     method set-worries(Bool $on) {
@@ -437,8 +446,16 @@ class RakuAST::LexicalScope
         nqp::die("IMPL-FATALIZE NYI on " ~ self.HOW.name(self));
     }
 
+    # Whether the &FATALIZE lookup this scope would wrap calls with has been
+    # resolved. In the setting a block compiled before &FATALIZE is declared
+    # has no resolution to wrap with.
+    method IMPL-FATALIZE-RESOLVED {
+        1
+    }
+
     method IMPL-MAYBE-FATALIZE-QAST($qast) {
-        self.IMPL-FATALIZE-QAST($qast, 0) if $!fatal;
+        self.IMPL-FATALIZE-QAST($qast, 0)
+            if $!fatal || $!fatalize-failures && self.IMPL-FATALIZE-RESOLVED;
 
         $qast
     }

@@ -150,6 +150,20 @@ class RakuAST::StatementPrefix::Try
   is RakuAST::SinkPropagator
   is RakuAST::ImplicitLookups
 {
+    method new(RakuAST::Blorst $blorst) {
+        # A try block throws a Failure produced inside it, then catches it here,
+        # rather than letting it leak out as a value (for example as the
+        # argument of a `return`). This is the runtime half of `use fatal`; it
+        # does not turn the block's compile-time worries into sorries the way
+        # `use fatal` does, so code that merely warns still compiles. An explicit
+        # `use fatal`/`no fatal` in the block sets its own flag and is left
+        # alone.
+        $blorst.set-fatalize-failures(True)
+          if nqp::istype($blorst, RakuAST::Block)
+          && !nqp::isconcrete($blorst.fatal);
+        nqp::findmethod(RakuAST::StatementPrefix, 'new')(self, $blorst)
+    }
+
     method type() { "try" }
 
     method propagate-sink(Bool $is-sunk) {
@@ -184,31 +198,40 @@ class RakuAST::StatementPrefix::Try
 
             my $tmp := QAST::Node.unique('fatalizee');
             my $qast := self.IMPL-CALLISH-QAST($context);
+
+            # Success path puts Nil into $! and evaluates to the block.
+            my $success := QAST::Stmts.new(
+                :resultchild(0),
+                QAST::Op.new(
+                    :op('bind'),
+                    QAST::Var.new( :name($tmp), :scope('local'), :decl('var') ),
+                    $qast
+                )
+            );
+            # A block result that is a Failure is sunk, so the block evaluates
+            # to it without it going off later. Under an explicit `no fatal`
+            # the block keeps soft Failures as values, so leave the result be.
+            unless nqp::istype($blorst, RakuAST::Block)
+              && nqp::isconcrete($blorst.fatal) && !$blorst.fatal {
+                $success.push(QAST::Op.new(
+                    :op('if'),
+                    QAST::Op.new(
+                        :op('istype'),
+                        QAST::Var.new( :name($tmp), :scope('local') ),
+                        $Failure,
+                    ),
+                    QAST::Op.new(
+                        :op('callmethod'), :name('sink'),
+                        QAST::Var.new( :name($tmp), :scope('local') )
+                    )
+                ));
+            }
             QAST::Op.new(
                 :op('handle'),
 
-                # Success path puts Nil into $! and evaluates to the block.
                 QAST::Stmt.new(
                     :resultchild(0),
-                    QAST::Stmts.new(
-                        :resultchild(0),
-                        QAST::Op.new(
-                            :op('bind'),
-                            QAST::Var.new( :name($tmp), :scope('local'), :decl('var') ),
-                            $qast
-                        ),
-                        QAST::Op.new(
-                            :op('if'),
-                            QAST::Op.new(
-                                :op('istype'),
-                                QAST::Var.new( :name($tmp), :scope('local') ),
-                                $Failure,
-                            ),
-                            QAST::Op.new(
-                                :op('callmethod'), :name('sink'),
-                                QAST::Var.new( :name($tmp), :scope('local') )
-                            )
-                        )),
+                    $success,
                     QAST::Op.new( :op('p6store'), $bang, $nil )
                 ),
 
