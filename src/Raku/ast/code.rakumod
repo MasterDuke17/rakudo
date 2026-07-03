@@ -227,13 +227,7 @@ class RakuAST::Code
                     QAST::BVal.new( :value($block) )
                 )
             );
-            @compstuff[2] := sub ($orig, $clone) {
-                $context.ensure-sc($clone);
-                $context.add-cleanup-task(sub () {
-                    nqp::bindattr($clone, Code, '@!compstuff', nqp::null());
-                });
-                $context.add-clone-for-cuid($clone, $cuid);
-
+            my $push-clone-fixup := sub ($clone) {
                 my $tmp := $fixups.unique('tmp_block_fixup');
                 $fixups.push(QAST::Stmt.new(
                     QAST::Op.new(
@@ -255,6 +249,26 @@ class RakuAST::Code
                         QAST::Var.new( :name($tmp), :scope('local') ),
                         QAST::WVal.new( :value($clone) )
                     )));
+            };
+            @compstuff[2] := sub ($orig, $clone) {
+                $context.ensure-sc($clone);
+                $context.add-cleanup-task(sub () {
+                    nqp::bindattr($clone, Code, '@!compstuff', nqp::null());
+                });
+                $context.add-clone-for-cuid($clone, $cuid);
+                $push-clone-fixup($clone);
+            }
+            # A clone made before this point, by BEGIN-time code such as
+            # `.wrap` cloning the routine it wraps, was registered by the
+            # stub-time callback, which has no code block to build a fixup
+            # from. Give each one the same load-time replacement of its
+            # compile-time do, so it closes over the runtime frames.
+            my %clones := $context.sub-id-to-cloned-code-objects();
+            if nqp::existskey(%clones, $cuid) {
+                for %clones{$cuid} -> $clone {
+                    $context.ensure-sc($clone);
+                    $push-clone-fixup($clone);
+                }
             }
             @compstuff[3] := $fixups;
         }
