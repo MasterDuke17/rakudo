@@ -805,10 +805,18 @@ class RakuAST::Regex::CharClass::HorizontalSpace
   is RakuAST::Regex::CharClass::Negatable
   is RakuAST::Regex::CharClassEnumerationElement
 {
+    method IMPL-HSPACE-CHARS() {
+        "\x[09,20,a0,1680,180e,2000,2001,2002,2003,2004,2005,2006,2007,2008,2009,200a,202f,205f,3000]"
+    }
+
     method IMPL-REGEX-QAST(RakuAST::IMPL::QASTContext $context, %mods) {
         QAST::Regex.new:
             :rxtype('enumcharlist'), :negate(self.negated),
-            "\x[09,20,a0,1680,180e,2000,2001,2002,2003,2004,2005,2006,2007,2008,2009,200a,202f,205f,3000]"
+            self.IMPL-HSPACE-CHARS
+    }
+
+    method IMPL-CCLASS-ENUM-CHARS(%mods) {
+        self.negated ?? "" !! self.IMPL-HSPACE-CHARS
     }
 
     method IMPL-CCLASS-ENUM-QAST(RakuAST::IMPL::QASTContext $context, %mods, Bool $negate) {
@@ -883,14 +891,27 @@ class RakuAST::Regex::CharClass::VerticalSpace
   is RakuAST::Regex::CharClass::Negatable
   is RakuAST::Regex::CharClassEnumerationElement
 {
+    # The single vertical-space codepoints. On its own, \v also matches the
+    # two-codepoint CR LF grapheme (IMPL-REGEX-QAST appends it); inside a
+    # character class it matches only these codepoints.
+    method IMPL-VSPACE-CHARS() { "\x[0a,0b,0c,0d,85,2028,2029]" }
+
     method IMPL-REGEX-QAST(RakuAST::IMPL::QASTContext $context, %mods) {
         QAST::Regex.new:
             :rxtype('enumcharlist'), :negate(self.negated),
-            "\x[0a,0b,0c,0d,85,2028,2029]\r\n"
+            self.IMPL-VSPACE-CHARS ~ "\r\n"
+    }
+
+    method IMPL-CCLASS-ENUM-CHARS(%mods) {
+        self.negated ?? "" !! self.IMPL-VSPACE-CHARS
     }
 
     method IMPL-CCLASS-ENUM-QAST(RakuAST::IMPL::QASTContext $context, %mods, Bool $negate) {
-        self.IMPL-MAYBE-NEGATE(self.IMPL-REGEX-QAST($context, %mods), $negate)
+        self.IMPL-MAYBE-NEGATE(
+            QAST::Regex.new(
+                :rxtype('enumcharlist'), :negate(self.negated),
+                self.IMPL-VSPACE-CHARS),
+            $negate)
     }
 }
 
