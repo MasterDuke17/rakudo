@@ -825,16 +825,19 @@ class RakuAST::Var::Package
   is RakuAST::CheckTime
 {
     has str $.sigil;
+    has str $.twigil;
     has RakuAST::Name $.name;
 
-    method new(RakuAST::Name :$name!, :$sigil) {
+    method new(RakuAST::Name :$name!, :$sigil, :$twigil) {
         my $obj := nqp::create(self);
         nqp::bindattr($obj, RakuAST::Var::Package, '$!name', $name);
         nqp::bindattr_s($obj, RakuAST::Var::Package, '$!sigil', $sigil);
+        nqp::bindattr_s($obj, RakuAST::Var::Package, '$!twigil', $twigil);
         $obj
     }
 
-    method sigil() { $!sigil }
+    method sigil()  { $!sigil }
+    method twigil() { $!twigil }
 
     method can-be-bound-to() {
         self.is-resolved ?? self.resolution.can-be-bound-to !! $!name.is-pseudo-package
@@ -859,16 +862,17 @@ class RakuAST::Var::Package
         if !self.is-resolved && !$!name.is-installable {
             my $name := $!name.canonicalize;
             self.add-sorry:
-                $resolver.build-exception: 'X::Undeclared', :symbol($!sigil ~ $name),
+                $resolver.build-exception: 'X::Undeclared', :symbol($!sigil ~ $!twigil ~ $name),
                     :suggestions($resolver.suggest-lexicals($name));
         }
     }
 
     method IMPL-EXPR-QAST(RakuAST::IMPL::QASTContext $context) {
-        my str $sigil := $!sigil;
+        my str $sigil  := $!sigil;
+        my str $twigil := $!twigil;
         if $!name.is-simple {
             if $!name.is-pseudo-package {
-                $!name.IMPL-QAST-PSEUDO-PACKAGE-LOOKUP($context, :$sigil);
+                $!name.IMPL-QAST-PSEUDO-PACKAGE-LOOKUP($context, :$sigil, :$twigil);
             }
             else {
                 my @parts := $!name.IMPL-LOOKUP-PARTS;
@@ -894,13 +898,13 @@ class RakuAST::Var::Package
                 }
                 for @parts {
                     $result := QAST::Op.new( :op('who'), $result );
-                    $result := $_.IMPL-QAST-PACKAGE-LOOKUP-PART($context, $result, $_ =:= $final, :$sigil);
+                    $result := $_.IMPL-QAST-PACKAGE-LOOKUP-PART($context, $result, $_ =:= $final, :$sigil, :$twigil);
                 }
                 $result
             }
         }
         else {
-            $!name.IMPL-QAST-INDIRECT-LOOKUP($context, :$sigil)
+            $!name.IMPL-QAST-INDIRECT-LOOKUP($context, :$sigil, :$twigil)
         }
     }
 
@@ -911,7 +915,7 @@ class RakuAST::Var::Package
     }
 
     method IMPL-BIND-QAST(RakuAST::IMPL::QASTContext $context, QAST::Node $source-qast) {
-        my $qast := $!name.IMPL-QAST-PSEUDO-PACKAGE-LOOKUP($context, :sigil($!sigil));
+        my $qast := $!name.IMPL-QAST-PSEUDO-PACKAGE-LOOKUP($context, :sigil($!sigil), :twigil($!twigil));
         $source-qast.named('BIND');
         $qast.push($source-qast);
         $qast

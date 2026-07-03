@@ -2510,9 +2510,9 @@ class Raku::Actions is HLL::Actions does Raku::CommonActions {
             my $origin-source := $*ORIGIN-SOURCE;
             if !$desigilname.is-identifier {
                 # A package-qualified $? variable like $?CALLER::PACKAGE looks
-                # up $?<name> through the package, twigil folded into the sigil.
+                # up $?<name> through the package.
                 $ast := Nodify('Var::Package').new(
-                  :sigil($sigil ~ $twigil), :name($desigilname)
+                  :$sigil, :$twigil, :name($desigilname)
                 );
             }
             elsif $name eq '$?LINE' {
