@@ -357,10 +357,28 @@ class RakuAST::Code
                             # value it holds there, as the legacy frontend does
                             # by referring to it in place.
                             if nqp::index('$@%&', nqp::substr($name, 0, 1)) >= 0 {
-                                # A sigil'd variable has a container; leaving the
-                                # reference late-bound lets the runtime lookup
-                                # reach that container for its default value (Any,
-                                # an empty Array, an empty Hash).
+                                # A sigil'd variable has a container. When the
+                                # declaration can produce it, bind that very
+                                # container here: the declaration's frame need
+                                # not exist at BEGIN time (a routine's, for a
+                                # trait argument like `is memoized(my %h)`),
+                                # and runtime frames start from a copy of it,
+                                # so a BEGIN-time write is visible at runtime.
+                                # An anonymous declaration has no name for
+                                # other code to share the container through,
+                                # so it, and anything else without a producible
+                                # container, stays late-bound for the runtime
+                                # lookup to satisfy.
+                                if nqp::istype($lexical, RakuAST::VarDeclaration::Simple)
+                                    && !nqp::istype($lexical, RakuAST::VarDeclaration::Anonymous)
+                                    && !nqp::objprimspec($lexical.meta-object) {
+                                    my $value := $lexical.meta-object;
+                                    $context.ensure-sc($value);
+                                    %seen{$name} := 1;
+                                    $block[0].push(
+                                        QAST::Var.new(:scope<lexical>, :decl<static>, :$name, :$value)
+                                    );
+                                }
                             }
                             else {
                                 # A sigilless binding has no container, so a
@@ -2058,8 +2076,11 @@ class RakuAST::Routine
         my $stub := self.IMPL-STUB-CODE($resolver, $context);
         nqp::setcodename($stub, $!name.canonicalize) if $!name;
 
-        # Apply any traits.
-        self.apply-traits($resolver, $context, self)
+        # Apply any traits, with the routine's own scope visible: a trait
+        # argument can declare into it, as in `is memoized(my %h)`.
+        $resolver.push-scope(self);
+        self.apply-traits($resolver, $context, self);
+        $resolver.pop-scope();
     }
 
     method set-value(Mu $value) {
