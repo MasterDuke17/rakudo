@@ -888,18 +888,27 @@ class RakuAST::Regex::CharClass::VerticalSpace
   is RakuAST::Regex::CharClass::Negatable
   is RakuAST::Regex::CharClassEnumerationElement
 {
+    # The single vertical-space codepoints. On its own, \v also matches the
+    # two-codepoint CR LF grapheme (IMPL-REGEX-QAST appends it); inside a
+    # character class it matches only these codepoints.
+    method IMPL-VSPACE-CHARS() { "\x[0a,0b,0c,0d,85,2028,2029]" }
+
     method IMPL-REGEX-QAST(RakuAST::IMPL::QASTContext $context, %mods) {
         QAST::Regex.new:
             :rxtype('enumcharlist'), :negate(self.negated),
-            "\x[0a,0b,0c,0d,85,2028,2029]\r\n"
+            self.IMPL-VSPACE-CHARS ~ "\r\n"
     }
 
     method IMPL-CCLASS-ENUM-CHARS(%mods) {
-        self.negated ?? "" !! "\x[0a,0b,0c,0d,85,2028,2029]\r\n"
+        self.negated ?? "" !! self.IMPL-VSPACE-CHARS
     }
 
     method IMPL-CCLASS-ENUM-QAST(RakuAST::IMPL::QASTContext $context, %mods, Bool $negate) {
-        self.IMPL-MAYBE-NEGATE(self.IMPL-REGEX-QAST($context, %mods), $negate)
+        self.IMPL-MAYBE-NEGATE(
+            QAST::Regex.new(
+                :rxtype('enumcharlist'), :negate(self.negated),
+                self.IMPL-VSPACE-CHARS),
+            $negate)
     }
 }
 
