@@ -344,7 +344,7 @@ class RakuAST::Name
         $result
     }
 
-    method IMPL-QAST-PACKAGE-LOOKUP(RakuAST::IMPL::QASTContext $context, Mu $start-package, RakuAST::Declaration :$lexical, str :$sigil, Bool :$global-fallback) {
+    method IMPL-QAST-PACKAGE-LOOKUP(RakuAST::IMPL::QASTContext $context, Mu $start-package, RakuAST::Declaration :$lexical, str :$sigil, str :$twigil, Bool :$global-fallback) {
         my $result;
         my $final := $!parts[nqp::elems($!parts) - 1];
         my int $first;
@@ -362,6 +362,7 @@ class RakuAST::Name
             $result := QAST::WVal.new(:value($start-package));
         }
         if self.is-pseudo-package {
+            # Pseudo-packages (CALLER, DYNAMIC, ...) never carry a twigil.
             $result := self.IMPL-QAST-PSEUDO-PACKAGE-LOOKUP($context, :$sigil);
         }
         else {
@@ -373,7 +374,7 @@ class RakuAST::Name
                 else { # get the Stash from all real packages
                     # We do .WHO on the current package, followed by the index into it.
                     $result := QAST::Op.new( :op('who'), $result );
-                    $result := $_.IMPL-QAST-PACKAGE-LOOKUP-PART($context, $result, $_ =:= $final, :$sigil, :$global-fallback, :suffix($_ =:= $final ?? $suffix !! ''));
+                    $result := $_.IMPL-QAST-PACKAGE-LOOKUP-PART($context, $result, $_ =:= $final, :$sigil, :$twigil, :$global-fallback, :suffix($_ =:= $final ?? $suffix !! ''));
                 }
             }
         }
@@ -451,17 +452,22 @@ class RakuAST::Name::Part::Simple
         $!name eq ''
     }
 
-    method IMPL-QAST-PACKAGE-LOOKUP-PART(RakuAST::IMPL::QASTContext $context, Mu $stash-qast, Int $is-final, str :$sigil, Bool :$global-fallback, str :$suffix) {
-        my str $key := $is-final && $sigil ?? $sigil ~ $!name !! $!name;
-        # The name's colonpair suffix, as in `infix:<+>`. The container is
-        # bound into the stash under the full canonicalized name, so the key
-        # needs it too.
-        $key := $key ~ $suffix if $is-final && $suffix;
+    # The final part's stash key carries its sigil and, for a variable like
+    # `our @.foo`, its twigil, plus any colonpair suffix as in `infix:<+>`. The
+    # container is bound into the stash under the full canonicalized name, so the
+    # key needs all of them. Earlier parts are keyed by bare name.
+    method IMPL-STASH-KEY(int $is-final, str $sigil, str $twigil?, str $suffix?) {
+        return $!name unless $is-final;
+        my str $key := $sigil ?? $sigil ~ ($twigil ?? $twigil !! '') ~ $!name !! $!name;
+        $suffix ?? $key ~ $suffix !! $key
+    }
+
+    method IMPL-QAST-PACKAGE-LOOKUP-PART(RakuAST::IMPL::QASTContext $context, Mu $stash-qast, Int $is-final, str :$sigil, str :$twigil, Bool :$global-fallback, str :$suffix) {
         my $op := QAST::Op.new(
             :op('callmethod'),
             :name($is-final ?? 'AT-KEY' !! 'package_at_key'),
             $stash-qast,
-            QAST::SVal.new( :value($key) )
+            QAST::SVal.new( :value(self.IMPL-STASH-KEY($is-final, $sigil, $twigil, $suffix)) )
         );
         $op.push(QAST::WVal.new(:value(True), :named<global_fallback>)) if $is-final && $global-fallback;
         $op
@@ -472,12 +478,12 @@ class RakuAST::Name::Part::Simple
             :op('call'),
             :name('&postcircumfix:<{ }>'),
             $stash-qast,
-            QAST::SVal.new( :value($is-final && $sigil ?? $sigil ~ $!name !! $!name) )
+            QAST::SVal.new( :value(self.IMPL-STASH-KEY($is-final, $sigil)) )
         )
     }
 
     method IMPL-QAST-INDIRECT-LOOKUP-PART(RakuAST::IMPL::QASTContext $context, Mu $stash-qast, Int $is-final, str :$sigil) {
-        QAST::SVal.new( :value($is-final && $sigil ?? $sigil ~ $!name !! $!name) )
+        QAST::SVal.new( :value(self.IMPL-STASH-KEY($is-final, $sigil)) )
     }
 }
 
@@ -501,7 +507,7 @@ class RakuAST::Name::Part::Expression
         )
     }
 
-    method IMPL-QAST-PACKAGE-LOOKUP-PART(RakuAST::IMPL::QASTContext $context, Mu $stash-qast, Int $is-final, str :$sigil, Bool :$global-fallback, str :$suffix) {
+    method IMPL-QAST-PACKAGE-LOOKUP-PART(RakuAST::IMPL::QASTContext $context, Mu $stash-qast, Int $is-final, str :$sigil, str :$twigil, Bool :$global-fallback, str :$suffix) {
         QAST::Op.new(
             :op('callmethod'),
             :name($is-final ?? 'AT-KEY' !! 'package_at_key'),
@@ -546,7 +552,7 @@ class RakuAST::Name::Part::Empty
         $stash-qast
     }
 
-    method IMPL-QAST-PACKAGE-LOOKUP-PART(RakuAST::IMPL::QASTContext $context, Mu $stash-qast, Int $is-final, str :$sigil, Bool :$global-fallback, str :$suffix) {
+    method IMPL-QAST-PACKAGE-LOOKUP-PART(RakuAST::IMPL::QASTContext $context, Mu $stash-qast, Int $is-final, str :$sigil, str :$twigil, Bool :$global-fallback, str :$suffix) {
         $stash-qast
     }
 
