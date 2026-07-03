@@ -288,7 +288,14 @@ class RakuAST::Node {
                 }
 
                 if nqp::istype($node, RakuAST::LexicalScope) {
-                    if nqp::istype($node, RakuAST::TraitTarget) {
+                    # A code object emits declarations for the blocks among
+                    # its children itself, including those in its traits.
+                    # Emitting a trait's block here as well would nest the
+                    # same block twice, and this frame's prologue would then
+                    # capture it against the wrong frame. A package produces
+                    # no frame of its own for a trait's block to nest in, so
+                    # its traits' blocks do belong here.
+                    if nqp::istype($node, RakuAST::TraitTarget) && !nqp::istype($node, RakuAST::Code) {
                         $node.visit-traits(-> $trait { @code-todo.push($trait) });
                     }
                 }
