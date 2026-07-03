@@ -1461,7 +1461,11 @@ class RakuAST::VarDeclaration::Simple
             # a lookup in the package.
             my $container := self.meta-object;
             $context.ensure-sc($container);
-            my $lookup := $!desigilname.IMPL-QAST-PACKAGE-LOOKUP($context, $!package, :sigil($!sigil), :global-fallback);
+            # Look the package slot up under the full name, sigil and twigil
+            # both, as self.name and the meta-object installation use. Without
+            # the twigil the lookup would miss the slot and global-fallback would
+            # vivify an orphan under the twigil-less name.
+            my $lookup := $!desigilname.IMPL-QAST-PACKAGE-LOOKUP($context, $!package, :sigil($!sigil), :twigil(self.twigil), :global-fallback);
             $lookup.name('VIVIFY-KEY');
             QAST::Op.new(
               :op('bind'),
