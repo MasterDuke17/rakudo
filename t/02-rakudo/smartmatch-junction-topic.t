@@ -1,6 +1,6 @@
 use Test;
 
-plan 29;
+plan 31;
 
 # A Junction on the left of a smartmatch matches over its eigenstates, even
 # against a matcher (such as a Hash) whose ACCEPTS sees the whole topic rather
@@ -34,6 +34,12 @@ my $rx = /f(o+)/;
 my $r = 'foo' ~~ $rx;
 isa-ok $r, Match, 'a regex held in a variable returns a Match';
 is ~$/[0], 'oo', 'a regex held in a variable sets $/';
+
+# The negated smartmatch sets $/ too, so captures from the match remain
+# available after a successful `nok`-style check.
+$/ = Nil;
+is ('foo' !~~ $rx), False, 'negated smartmatch against a matching regex variable';
+is ~$/[0], 'oo', 'the negated smartmatch still sets $/';
 
 # The pattern from Acme::BaseCJK: a subset whose where-clause threads a
 # Junction over a constant Map.
