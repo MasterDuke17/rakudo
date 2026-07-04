@@ -134,5 +134,11 @@ multi sub infix:<~~>(Mu \topic, Regex:D $matcher) {
     $/ := nqp::getlexrelcaller(nqp::ctxcallerskipthunks(nqp::ctx()),'$/');
     $matcher.ACCEPTS(topic)
 }
+# Disambiguates from the Junction topic candidate of infix:<~~>. Regex.ACCEPTS
+# autothreads a Junction topic itself, returning a Junction of match results.
+multi sub infix:<~~>(Junction:D \topic, Regex:D $matcher) {
+    $/ := nqp::getlexrelcaller(nqp::ctxcallerskipthunks(nqp::ctx()),'$/');
+    $matcher.ACCEPTS(topic)
+}
 
 # vim: expandtab shiftwidth=4
