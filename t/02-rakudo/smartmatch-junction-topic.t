@@ -1,6 +1,6 @@
 use Test;
 
-plan 24;
+plan 29;
 
 # A Junction on the left of a smartmatch matches over its eigenstates, even
 # against a matcher (such as a Hash) whose ACCEPTS sees the whole topic rather
@@ -72,5 +72,17 @@ ok $matched.so, 'the match Junction collapses to True when an eigenstate matches
 my $jn = any('xxx', 'yyy');
 nok ($jn ~~ $rxa).so, 'the match Junction collapses to False when no eigenstate matches';
 is ($jn !~~ $rxa), True, 'negated smartmatch of a Junction against a regex variable';
+
+# A complex right side (not a variable or constant) matches the same way as
+# a variable one.
+is (all('a', 'b') ~~ %h.Map), True, 'all-Junction against a complex expression yielding a Map';
+$topic-seen = Nil;
+my %matchers = m => JunctionAware.new;
+is ($j ~~ %matchers<m>), True, 'a custom ACCEPTS matcher from a complex expression decides the match';
+ok $topic-seen === Junction, 'that matcher received the whole Junction';
+my %rxs = k => /f(o+)/;
+my $cm = 'foo' ~~ %rxs<k>;
+isa-ok $cm, Match, 'a regex from a complex expression returns a Match';
+is ~$/[0], 'oo', 'a regex from a complex expression sets $/';
 
 # vim: expandtab shiftwidth=4
