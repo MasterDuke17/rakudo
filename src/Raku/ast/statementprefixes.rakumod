@@ -603,7 +603,52 @@ class RakuAST::StatementPrefix::React
 class RakuAST::StatementPrefix::Supply
   is RakuAST::StatementPrefix::Wheneverable
 {
+    has int $!one-emit;
+
     method type() { "supply" }
+
+    method PERFORM-BEGIN(RakuAST::Resolver $resolver, RakuAST::IMPL::QASTContext $context) {
+        self.IMPL-LOWER-ONE-EMIT();
+        nqp::findmethod(RakuAST::StatementPrefix::Blorst, 'PERFORM-BEGIN')(self, $resolver, $context)
+    }
+
+    # A supply whose whole body is a single `emit EXPR` doesn't need the
+    # supply concurrency machinery: rewrite the body to just EXPR and route
+    # it to &SUPPLY-ONE-EMIT, whose tappable evaluates the block and emits
+    # its return value, quitting on a thrown or failed evaluation.
+    method IMPL-LOWER-ONE-EMIT() {
+        unless self.IMPL-WHENEVER-COUNT {
+            my $blorst := self.blorst;
+            my $stmt;
+            if nqp::istype($blorst, RakuAST::Block) {
+                my @stmts := $blorst.body.statement-list.IMPL-NON-EMPTY-CODE-STATEMENTS;
+                $stmt := @stmts[0] if nqp::elems(@stmts) == 1;
+            }
+            else {
+                $stmt := $blorst;
+            }
+            if nqp::istype($stmt, RakuAST::Statement::Expression)
+              && !$stmt.condition-modifier && !$stmt.loop-modifier {
+                my $call := $stmt.expression;
+                if nqp::istype($call, RakuAST::Call::Name)
+                  && $call.name.is-identifier
+                  && $call.name.canonicalize eq 'emit'
+                  && $call.args.IMPL-IS-ONE-POS-ARG {
+                    $stmt.set-expression($call.args.arg-at-pos(0));
+                    nqp::bindattr_i(self, RakuAST::StatementPrefix::Supply, '$!one-emit', 1);
+                }
+            }
+        }
+        Nil
+    }
+
+    method IMPL-EXPR-QAST(RakuAST::IMPL::QASTContext $context) {
+        $!one-emit
+            ?? QAST::Op.new(
+                 :op<call>, :name('&SUPPLY-ONE-EMIT'), self.IMPL-CLOSURE-QAST($context)
+               )
+            !! nqp::findmethod(RakuAST::StatementPrefix::Wheneverable, 'IMPL-EXPR-QAST')(self, $context)
+    }
 }
 
 # Done by all phasers. Serves as little more than a marker for phasers, for
