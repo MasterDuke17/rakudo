@@ -435,9 +435,14 @@ class RakuAST::Resolver {
     }
 
     method IMPL-STASH-HASH(Mu $pkg) {
+        # A generic (an unbound role type-capture) has a null WHO, as does an
+        # otherwise stash-less package. It has no members to look up, so treat
+        # it as an empty stash rather than reaching into a null.
         nqp::ishash(my $hash := $pkg.WHO)
           ?? $hash
-          !! nqp::getattr($hash, Map, '$!storage')
+          !! nqp::isnull($hash)
+            ?? nqp::hash()
+            !! nqp::getattr($hash, Map, '$!storage')
     }
 
     # Resolves a lexical in the chain of outer contexts.
