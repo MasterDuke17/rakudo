@@ -1516,6 +1516,10 @@ class RakuAST::Block
         self.IMPL-UNWRAP-LIST(self.get-implicit-lookups)[1].resolution.compile-time-value;
     }
 
+    method IMPL-FATALIZE-RESOLVED() {
+        self.IMPL-UNWRAP-LIST(self.get-implicit-lookups)[1].is-resolved
+    }
+
     method IMPL-IS-IN-METHOD() {
         $!is-in-method
     }

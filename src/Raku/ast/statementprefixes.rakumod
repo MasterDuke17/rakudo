@@ -150,6 +150,20 @@ class RakuAST::StatementPrefix::Try
   is RakuAST::SinkPropagator
   is RakuAST::ImplicitLookups
 {
+    method new(RakuAST::Blorst $blorst) {
+        # A try block throws a Failure produced inside it, then catches it here,
+        # rather than letting it leak out as a value (for example as the
+        # argument of a `return`). This is the runtime half of `use fatal`; it
+        # does not turn the block's compile-time worries into sorries the way
+        # `use fatal` does, so code that merely warns still compiles. An explicit
+        # `use fatal`/`no fatal` in the block sets its own flag and is left
+        # alone.
+        $blorst.set-fatalize-failures(True)
+          if nqp::istype($blorst, RakuAST::Block)
+          && !nqp::isconcrete($blorst.fatal);
+        nqp::findmethod(RakuAST::StatementPrefix, 'new')(self, $blorst)
+    }
+
     method type() { "try" }
 
     method propagate-sink(Bool $is-sunk) {
@@ -184,31 +198,40 @@ class RakuAST::StatementPrefix::Try
 
             my $tmp := QAST::Node.unique('fatalizee');
             my $qast := self.IMPL-CALLISH-QAST($context);
+
+            # Success path puts Nil into $! and evaluates to the block.
+            my $success := QAST::Stmts.new(
+                :resultchild(0),
+                QAST::Op.new(
+                    :op('bind'),
+                    QAST::Var.new( :name($tmp), :scope('local'), :decl('var') ),
+                    $qast
+                )
+            );
+            # A block result that is a Failure is sunk, so the block evaluates
+            # to it without it going off later. Under an explicit `no fatal`
+            # the block keeps soft Failures as values, so leave the result be.
+            unless nqp::istype($blorst, RakuAST::Block)
+              && nqp::isconcrete($blorst.fatal) && !$blorst.fatal {
+                $success.push(QAST::Op.new(
+                    :op('if'),
+                    QAST::Op.new(
+                        :op('istype'),
+                        QAST::Var.new( :name($tmp), :scope('local') ),
+                        $Failure,
+                    ),
+                    QAST::Op.new(
+                        :op('callmethod'), :name('sink'),
+                        QAST::Var.new( :name($tmp), :scope('local') )
+                    )
+                ));
+            }
             QAST::Op.new(
                 :op('handle'),
 
-                # Success path puts Nil into $! and evaluates to the block.
                 QAST::Stmt.new(
                     :resultchild(0),
-                    QAST::Stmts.new(
-                        :resultchild(0),
-                        QAST::Op.new(
-                            :op('bind'),
-                            QAST::Var.new( :name($tmp), :scope('local'), :decl('var') ),
-                            $qast
-                        ),
-                        QAST::Op.new(
-                            :op('if'),
-                            QAST::Op.new(
-                                :op('istype'),
-                                QAST::Var.new( :name($tmp), :scope('local') ),
-                                $Failure,
-                            ),
-                            QAST::Op.new(
-                                :op('callmethod'), :name('sink'),
-                                QAST::Var.new( :name($tmp), :scope('local') )
-                            )
-                        )),
+                    $success,
                     QAST::Op.new( :op('p6store'), $bang, $nil )
                 ),
 
@@ -580,7 +603,52 @@ class RakuAST::StatementPrefix::React
 class RakuAST::StatementPrefix::Supply
   is RakuAST::StatementPrefix::Wheneverable
 {
+    has int $!one-emit;
+
     method type() { "supply" }
+
+    method PERFORM-BEGIN(RakuAST::Resolver $resolver, RakuAST::IMPL::QASTContext $context) {
+        self.IMPL-LOWER-ONE-EMIT();
+        nqp::findmethod(RakuAST::StatementPrefix::Blorst, 'PERFORM-BEGIN')(self, $resolver, $context)
+    }
+
+    # A supply whose whole body is a single `emit EXPR` doesn't need the
+    # supply concurrency machinery: rewrite the body to just EXPR and route
+    # it to &SUPPLY-ONE-EMIT, whose tappable evaluates the block and emits
+    # its return value, quitting on a thrown or failed evaluation.
+    method IMPL-LOWER-ONE-EMIT() {
+        unless self.IMPL-WHENEVER-COUNT {
+            my $blorst := self.blorst;
+            my $stmt;
+            if nqp::istype($blorst, RakuAST::Block) {
+                my @stmts := $blorst.body.statement-list.IMPL-NON-EMPTY-CODE-STATEMENTS;
+                $stmt := @stmts[0] if nqp::elems(@stmts) == 1;
+            }
+            else {
+                $stmt := $blorst;
+            }
+            if nqp::istype($stmt, RakuAST::Statement::Expression)
+              && !$stmt.condition-modifier && !$stmt.loop-modifier {
+                my $call := $stmt.expression;
+                if nqp::istype($call, RakuAST::Call::Name)
+                  && $call.name.is-identifier
+                  && $call.name.canonicalize eq 'emit'
+                  && $call.args.IMPL-IS-ONE-POS-ARG {
+                    $stmt.set-expression($call.args.arg-at-pos(0));
+                    nqp::bindattr_i(self, RakuAST::StatementPrefix::Supply, '$!one-emit', 1);
+                }
+            }
+        }
+        Nil
+    }
+
+    method IMPL-EXPR-QAST(RakuAST::IMPL::QASTContext $context) {
+        $!one-emit
+            ?? QAST::Op.new(
+                 :op<call>, :name('&SUPPLY-ONE-EMIT'), self.IMPL-CLOSURE-QAST($context)
+               )
+            !! nqp::findmethod(RakuAST::StatementPrefix::Wheneverable, 'IMPL-EXPR-QAST')(self, $context)
+    }
 }
 
 # Done by all phasers. Serves as little more than a marker for phasers, for
