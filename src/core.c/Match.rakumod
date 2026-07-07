@@ -423,5 +423,37 @@ sub make(Mu \made) {
         !! X::Make::MatchRequired.new(:got($slash)).throw
 }
 
+# A concrete Match matcher is a match result already, so the smartmatch
+# returns it as-is rather than boolifying, the same way matching against a
+# regex returns the Match. The raku-smartmatch dispatcher implements the
+# same rule.
+multi sub infix:<~~>(Mu \topic, Match:D $matcher) {
+    $matcher
+}
+multi sub infix:<!~~>(Mu \topic, Match:D $matcher) {
+    $matcher.not
+}
+# Disambiguate from the Junction topic candidates: a Junction topic still
+# matches over its eigenstates.
+multi sub infix:<~~>(Junction:D \topic, Match:D $matcher) {
+#?if moar
+    nqp::dispatch('raku-smartmatch', topic, $matcher, nqp::unbox_i(1))
+#?endif
+#?if !moar
+    SETTING-ONLY-ACCEPTS($matcher)
+      ?? topic.BOOLIFY-ACCEPTS($matcher)
+      !! $matcher.ACCEPTS(topic).Bool
+#?endif
+}
+multi sub infix:<!~~>(Junction:D \topic, Match:D $matcher) {
+#?if moar
+    nqp::dispatch('raku-smartmatch', topic, $matcher, nqp::unbox_i(-1))
+#?endif
+#?if !moar
+    SETTING-ONLY-ACCEPTS($matcher)
+      ?? topic.BOOLIFY-ACCEPTS($matcher, 1)
+      !! $matcher.ACCEPTS(topic).not
+#?endif
+}
 
 # vim: expandtab shiftwidth=4

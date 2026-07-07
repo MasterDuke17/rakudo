@@ -644,38 +644,23 @@ class RakuAST::Infix
                 $sm-call);
         }
 
-        my $accepts-call;
-        if $negate {
-            $accepts-call := QAST::Op.new(
-                :op<callmethod>, :name<not>,
-                QAST::Op.new(
-                    :op('callmethod'), :name('ACCEPTS'),
-                    $right.IMPL-TO-QAST($context),
-                    QAST::Var.new(:name<$_>, :scope<lexical>)));
+        # Only the RHS evaluation needs $_ bound to the topic; the match
+        # itself is the plain infix operator, which keeps the smartmatch
+        # semantics (Junction topics, Regex and custom ACCEPTS matchers) in
+        # one place.
+        my $name;
+        if self.is-resolved || !$*COMPILING_CORE_SETTING {
+            $name := self.resolution.lexical-name;
         }
         else {
-            my $rhs-local := QAST::Node.unique('!sm-rhs');
-            $accepts-call := QAST::Op.new(
-                :op('callmethod'), :name('ACCEPTS'),
-                QAST::Var.new( :name($rhs-local), :scope<local> ),
-                QAST::Var.new(:name<$_>, :scope<lexical>));
-            $accepts-call := QAST::Op.new(
-                :op<if>,
-                QAST::Op.new(
-                    :op<istype>,
-                    QAST::Op.new(
-                        :op<bind>,
-                        QAST::Var.new( :name($rhs-local), :scope<local>, :decl<var> ),
-                        $right.IMPL-TO-QAST($context),
-                    ),
-                    QAST::WVal.new( :value(Regex) )),
-                $accepts-call,
-                QAST::Op.new(
-                    :op<callmethod>,
-                    :name<Bool>,
-                    $accepts-call ));
+            $name := '&infix' ~ RakuAST::Resolver.IMPL-CANONICALIZE-PAIR($!operator);
         }
-        self.IMPL-TEMPORARIZE-TOPIC( $left.IMPL-TO-QAST($context), $accepts-call )
+        self.IMPL-TEMPORARIZE-TOPIC(
+            $left.IMPL-TO-QAST($context),
+            QAST::Op.new(
+                :op<call>, :$name,
+                QAST::Var.new( :name<$_>, :scope<lexical> ),
+                $right.IMPL-TO-QAST($context)))
     }
 
     method IMPL-LIST-INFIX-QAST(RakuAST::IMPL::QASTContext $context, Mu $operands) {

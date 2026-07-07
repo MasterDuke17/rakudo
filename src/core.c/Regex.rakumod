@@ -134,5 +134,21 @@ multi sub infix:<~~>(Mu \topic, Regex:D $matcher) {
     $/ := nqp::getlexrelcaller(nqp::ctxcallerskipthunks(nqp::ctx()),'$/');
     $matcher.ACCEPTS(topic)
 }
+# Disambiguates from the Junction topic candidate of infix:<~~>. Regex.ACCEPTS
+# autothreads a Junction topic itself, returning a Junction of match results.
+multi sub infix:<~~>(Junction:D \topic, Regex:D $matcher) {
+    $/ := nqp::getlexrelcaller(nqp::ctxcallerskipthunks(nqp::ctx()),'$/');
+    $matcher.ACCEPTS(topic)
+}
+# The negated smartmatch also binds the caller's $/, so a capture from the
+# match remains available after `$str !~~ /.../`.
+multi sub infix:<!~~>(Mu \topic, Regex:D $matcher) {
+    $/ := nqp::getlexrelcaller(nqp::ctxcallerskipthunks(nqp::ctx()),'$/');
+    $matcher.ACCEPTS(topic).not
+}
+multi sub infix:<!~~>(Junction:D \topic, Regex:D $matcher) {
+    $/ := nqp::getlexrelcaller(nqp::ctxcallerskipthunks(nqp::ctx()),'$/');
+    $matcher.ACCEPTS(topic).not
+}
 
 # vim: expandtab shiftwidth=4

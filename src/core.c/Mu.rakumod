@@ -1408,11 +1408,51 @@ proto sub defined(Mu, *%) is pure {*}
 multi sub defined(Mu \x) { x.defined }
 
 proto sub infix:<~~>(Mu, Mu, *%) {*}
+# BOOLIFY-ACCEPTS is only valid for matchers using the setting's ACCEPTS; a
+# class that adds its own ACCEPTS candidates may handle a whole Junction topic
+# itself. Mirrors is-method-setting-only in src/vm/moar/dispatchers.nqp.
+my sub SETTING-ONLY-ACCEPTS(Mu \matcher) is implementation-detail {
+    my \accepts := nqp::tryfindmethod(nqp::decont(matcher),'ACCEPTS');
+    nqp::defined(accepts)
+      ?? nqp::istype(accepts,Routine)
+        ?? accepts.IS-SETTING-ONLY(nqp::const::SIG_ELEM_DEFINED_ONLY)
+        !! nqp::istype(accepts,Code)
+          ?? accepts.file.starts-with('SETTING::')
+          !! True
+      !! True
+}
+# A Junction topic smartmatches over its eigenstates. Handing the whole
+# Junction to ACCEPTS gives the wrong answer for matchers whose ACCEPTS does
+# not distribute it (an Associative sees the entire Junction), so reverse the
+# call via BOOLIFY-ACCEPTS, which matches each eigenstate against the matcher.
+# On MoarVM the raku-smartmatch dispatcher implements the same rule, and its
+# callsite caching answers the setting-only question with guards rather than
+# a candidate walk on every call.
+multi sub infix:<~~>(Junction:D \topic, Mu \matcher) {
+#?if moar
+    nqp::dispatch('raku-smartmatch', topic, matcher, nqp::unbox_i(1))
+#?endif
+#?if !moar
+    SETTING-ONLY-ACCEPTS(matcher)
+      ?? topic.BOOLIFY-ACCEPTS(matcher)
+      !! matcher.ACCEPTS(topic).Bool
+#?endif
+}
 multi sub infix:<~~>(Mu \topic, Mu \matcher) {
     matcher.ACCEPTS(topic).Bool;
 }
 
 proto sub infix:<!~~>(Mu, Mu, *%) {*}
+multi sub infix:<!~~>(Junction:D \topic, Mu \matcher) {
+#?if moar
+    nqp::dispatch('raku-smartmatch', topic, matcher, nqp::unbox_i(-1))
+#?endif
+#?if !moar
+    SETTING-ONLY-ACCEPTS(matcher)
+      ?? topic.BOOLIFY-ACCEPTS(matcher, 1)
+      !! matcher.ACCEPTS(topic).not
+#?endif
+}
 multi sub infix:<!~~>(Mu \topic, Mu \matcher) {
     matcher.ACCEPTS(topic).not;
 }
