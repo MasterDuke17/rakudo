@@ -1177,6 +1177,17 @@ class RakuAST::PackageInstaller {
     method is-stub() { False }
     method defuse-stub() { }
 
+    # Install a symbol via the package's WHO rather than the underlying
+    # storage hash. The serialization write barrier only marks the object
+    # named in the write, and a Stash's storage hash may be a fresh clone
+    # that belongs to no serialization context. Writing to the storage
+    # directly can therefore leave a precompilation without a repossession
+    # entry for a stash it modified, so modules loading it never see the
+    # symbol and same-named packages diverge instead of merging.
+    method IMPL-STASH-BIND(Mu $package, str $key, Mu $value) {
+        nqp::bindkey($package.WHO, $key, $value);
+    }
+
     method IMPL-INSTALL-PACKAGE(
         RakuAST::Resolver $resolver,
         str $scope,
@@ -1289,8 +1300,7 @@ class RakuAST::PackageInstaller {
                         $longname := $longname ~ '::' ~ $_.name;
                         my $package := Perl6::Metamodel::PackageHOW.new_type(name => $longname);
                         $package.HOW.compose($package);
-                        my %stash := $resolver.IMPL-STASH-HASH($target);
-                        %stash{$_.name} := $package;
+                        self.IMPL-STASH-BIND($target, $_.name, $package);
                         $target := $package;
                     }
                 }
@@ -1307,8 +1317,7 @@ class RakuAST::PackageInstaller {
                         :package(self);
                 if $scope eq 'our' {
                     # TODO conflicts
-                    my %stash := $resolver.IMPL-STASH-HASH($current-package);
-                    %stash{$first} := $target;
+                    self.IMPL-STASH-BIND($current-package, $first, $target);
                 }
                 $scope := 'our'; # Ensure we install the package into the generated stub
 
@@ -1317,8 +1326,7 @@ class RakuAST::PackageInstaller {
                     $longname := $longname ~ '::' ~ $_.name;
                     my $package := Perl6::Metamodel::PackageHOW.new_type(name => $longname);
                     $package.HOW.compose($package);
-                    my %stash := $resolver.IMPL-STASH-HASH($target);
-                    %stash{$_.name} := $package;
+                    self.IMPL-STASH-BIND($target, $_.name, $package);
                     $target := $package;
                 }
             }
@@ -1348,7 +1356,7 @@ class RakuAST::PackageInstaller {
         # setting's serialization context, which breaks precompilation.
         if $lexical
           && nqp::istype($lexical.compile-time-value.HOW, Perl6::Metamodel::PackageHOW) {
-            %stash{$final} := $lexical.compile-time-value;
+            self.IMPL-STASH-BIND($target, $final, $lexical.compile-time-value);
         }
         if $scope eq 'our' {
             if nqp::existskey(%stash, $final) && !(%stash{$final} =:= $type-object) {
@@ -1366,7 +1374,7 @@ class RakuAST::PackageInstaller {
                         'X::Redeclaration', :symbol($name.canonicalize);
                 }
             }
-            %stash{$final} := $type-object;
+            self.IMPL-STASH-BIND($target, $final, $type-object);
         }
     }
 
