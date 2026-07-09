@@ -1203,6 +1203,7 @@ class RakuAST::PackageInstaller {
         my $target;
         my $final;
         my $lexical;
+        my $lexical-stub;
         my $type-object := nqp::eqaddr($meta-object, Mu) ?? self.stubbed-meta-object !! $meta-object;
         # If the multi-part install resolves its parent through the
         # setting / outer lexical chain (cross-compunit reload),
@@ -1222,6 +1223,18 @@ class RakuAST::PackageInstaller {
         if $name.is-identifier {
             $final := $name.canonicalize(:colonpairs(0));
             $lexical := $resolver.resolve-lexical-constant($final);
+            # Capture a stub package an import already installed under this
+            # name. Resolving the name here finds this declaration itself,
+            # and the lexical merge below rebinds the import to this
+            # declaration's type object, so query the generated lexical and
+            # do it before that merge. The stash upgrade further down needs
+            # the stub itself so this package can adopt its WHO, which other
+            # compilation units may already share and write to.
+            my $generated := $resolver.current-scope.find-generated-lexical($final);
+            $lexical-stub := $generated.compile-time-value
+                if $generated
+                && nqp::istype($generated, RakuAST::CompileTimeValue)
+                && nqp::istype($generated.compile-time-value.HOW, Perl6::Metamodel::PackageHOW);
             # `my package EXPORT` names a package the compunit already declares
             # implicitly. Reuse that lexical, pointing it at the new package,
             # rather than declaring a second of the same name and colliding.
@@ -1354,9 +1367,10 @@ class RakuAST::PackageInstaller {
         # is shadowed by this declaration, not adopted; injecting it makes
         # the silent-replace below steal the builtin's WHO out of the
         # setting's serialization context, which breaks precompilation.
-        if $lexical
-          && nqp::istype($lexical.compile-time-value.HOW, Perl6::Metamodel::PackageHOW) {
-            self.IMPL-STASH-BIND($target, $final, $lexical.compile-time-value);
+        # The stub was captured before the lexical merge, which rebinds the
+        # resolved declaration to this declaration's own type object.
+        if !nqp::eqaddr($lexical-stub, NQPMu) && $scope eq 'our' {
+            self.IMPL-STASH-BIND($target, $final, $lexical-stub);
         }
         if $scope eq 'our' {
             if nqp::existskey(%stash, $final) && !(%stash{$final} =:= $type-object) {
