@@ -300,6 +300,14 @@ class RakuAST::StatementModifier::For
   is RakuAST::ForLoopImplementation
   is RakuAST::ImplicitLookups
 {
+    # Set when the optimize pass has approved lowering a CORE integer-range
+    # source to a native counting loop.
+    has int $!can-lower-range;
+
+    method IMPL-SET-CAN-LOWER-RANGE() {
+        nqp::bindattr_i(self, RakuAST::StatementModifier::For, '$!can-lower-range', 1)
+    }
+
     method PRODUCE-IMPLICIT-LOOKUPS() {
         [
             RakuAST::Var::Lexical::Setting.new(
@@ -323,14 +331,28 @@ class RakuAST::StatementModifier::For
                  && self.IMPL-CAN-USE-STATEMENT-FORM($expression)
             !! True) {
             my @lookups := self.IMPL-UNWRAP-LIST(self.get-implicit-lookups);
-            $for-qast := self.IMPL-TO-QAST-STATEMENT(
-                $context,
-                $source-qast,
-                $statement-qast,
-                RakuAST::Label,
-                @lookups[0].resolution.compile-time-value,
-                @lookups[1].resolution.compile-time-value
-            );
+            my $Nil := @lookups[1].resolution.compile-time-value;
+
+            # An integer-range source the optimize pass approved becomes a
+            # native counting loop, unless a bound turns out not to be a
+            # native-friendly integer.
+            if $!can-lower-range
+                && !($block && nqp::istype($expression, RakuAST::Code)
+                      && $expression.has-any-phasers) {
+                $for-qast := self.IMPL-TO-QAST-RANGE(
+                    $context, $source, $statement-qast, $Nil);
+            }
+
+            if !nqp::isconcrete($for-qast) {
+                $for-qast := self.IMPL-TO-QAST-STATEMENT(
+                    $context,
+                    $source-qast,
+                    $statement-qast,
+                    RakuAST::Label,
+                    @lookups[0].resolution.compile-time-value,
+                    $Nil
+                );
+            }
         }
         else {
             $for-qast := self.IMPL-FOR-QAST(

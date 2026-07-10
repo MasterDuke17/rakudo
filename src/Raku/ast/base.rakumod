@@ -713,6 +713,7 @@ class RakuAST::Node {
             self.IMPL-MARK-NATIVE-METAOP($resolver, $expr);
             self.IMPL-MARK-SCALAR-METAOP($resolver, $expr);
             self.IMPL-MARK-DOT-ASSIGN($resolver, $expr);
+            self.IMPL-MARK-RANGE-FOR($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -858,6 +859,36 @@ class RakuAST::Node {
                 $call.IMPL-SET-INLINE if $dispatcher && $dispatcher eq 'dispatch:<.=>';
             }
         }
+        Nil
+    }
+
+    # Mark a for loop whose source is an integer range built by a CORE range
+    # constructor (`..` and its exclusive variants, prefix `^`, or `reverse`
+    # of one) for lowering to a native counting loop at code generation. Both
+    # the statement form and the statement modifier form qualify. Only the
+    # source shape and the operator's origin are decided here; code generation
+    # checks the loop itself (sunk, serial, simple body) and the bounds, and
+    # falls back to the ordinary compilation when those disqualify.
+    method IMPL-MARK-RANGE-FOR(RakuAST::Resolver $resolver, Mu $expr) {
+        my $for;
+        if nqp::istype($expr, RakuAST::Statement::For) {
+            $for := $expr;
+        }
+        elsif nqp::istype($expr, RakuAST::Statement::Expression)
+            && nqp::isconcrete($expr.loop-modifier)
+            && nqp::istype($expr.loop-modifier, RakuAST::StatementModifier::For) {
+            $for := $expr.loop-modifier;
+        }
+        else {
+            return Nil;
+        }
+        my $source := nqp::istype($for, RakuAST::Statement::For)
+            ?? $for.source
+            !! $for.expression;
+        my $operator := $for.IMPL-RANGE-FOR-OPERATOR($source);
+        $for.IMPL-SET-CAN-LOWER-RANGE()
+            if nqp::isconcrete($operator)
+            && self.IMPL-OPERATOR-IS-CORE($resolver, $operator);
         Nil
     }
 

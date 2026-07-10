@@ -178,6 +178,185 @@ class RakuAST::ForLoopImplementation
             $body-qast, $label // RakuAST::Label)
     }
 
+    # Strip parentheses that are pure syntactic grouping around a single
+    # expression, returning the expression inside.
+    method IMPL-UNWRAP-RANGE-EXPRESSION(Mu $node) {
+        my $expr := $node;
+        while nqp::istype($expr, RakuAST::Circumfix::Parentheses) {
+            my @statements := self.IMPL-UNWRAP-LIST($expr.semilist.statements);
+            last unless nqp::elems(@statements) == 1
+                && nqp::istype(@statements[0], RakuAST::Statement::Expression);
+            $expr := @statements[0].expression;
+        }
+        $expr
+    }
+
+    # The operator node of a for source that is shaped like an integer
+    # range: an infix range constructor, a ^ prefix, or an argument-less
+    # reverse method call on either. Returns Nil for any other shape.
+    method IMPL-RANGE-FOR-OPERATOR(Mu $source) {
+        my $expr := self.IMPL-UNWRAP-RANGE-EXPRESSION($source);
+        if nqp::istype($expr, RakuAST::ApplyPostfix)
+            && nqp::istype($expr.postfix, RakuAST::Call::Method)
+            && $expr.postfix.name.canonicalize eq 'reverse'
+            && !(nqp::isconcrete($expr.postfix.args) && $expr.postfix.args.arity) {
+            $expr := self.IMPL-UNWRAP-RANGE-EXPRESSION($expr.operand);
+        }
+        if nqp::istype($expr, RakuAST::ApplyInfix)
+            && nqp::istype($expr.infix, RakuAST::Infix) {
+            my str $op := $expr.infix.operator;
+            return $expr.infix
+                if $op eq '..' || $op eq '..^' || $op eq '^..' || $op eq '^..^';
+        }
+        elsif nqp::istype($expr, RakuAST::ApplyPrefix)
+            && nqp::istype($expr.prefix, RakuAST::Prefix)
+            && $expr.prefix.operator eq '^' {
+            return $expr.prefix;
+        }
+        Nil
+    }
+
+    # QAST for one bound of a lowered range loop: an integer known at
+    # compile time, or a native int variable, with the exclusivity
+    # adjustment folded in. Returns Mu for a bound that cannot be turned
+    # into a native int without changing behaviour. Compile-time values
+    # stay within 32 bits so the loop's native arithmetic cannot overflow.
+    method IMPL-RANGE-BOUND-QAST(RakuAST::IMPL::QASTContext $context, Mu $node, int $extra) {
+        if $node.has-compile-time-value {
+            my $value := nqp::decont($node.maybe-compile-time-value);
+            if nqp::istype($value, Int) && nqp::isconcrete($value) {
+                my num $test := nqp::tonum_I($value) + $extra;
+                if $test > -2147483648e0 && $test < 2147483647e0 {
+                    return QAST::IVal.new(
+                        :value(nqp::add_i(nqp::unbox_i($value), $extra)));
+                }
+            }
+        }
+        elsif nqp::istype($node, RakuAST::Var::Lexical) && $node.is-resolved
+            && nqp::objprimspec($node.return-type) == 1 {
+            my $qast := $node.IMPL-TO-QAST($context);
+            return $extra
+                ?? QAST::Op.new( :op<add_i>, :returns(int),
+                     $qast, QAST::IVal.new( :value($extra) ) )
+                !! $qast;
+        }
+        Mu
+    }
+
+    # The native counting loop for a sunk statement-level `for` over an
+    # integer range, the equivalent of the legacy optimizer's for-range
+    # rewrite. Steps a native int from start to end and calls the body
+    # with it, never building the Range or its iterator. Returns Mu when
+    # a bound disqualifies; the caller then falls back to the iterator
+    # form. The caller has already verified the operator is the CORE one
+    # via the optimize pass and that the body is a simple one-argument
+    # block with no phasers.
+    method IMPL-TO-QAST-RANGE(RakuAST::IMPL::QASTContext $context,
+            Mu $source, Mu $body-qast, Mu $Nil) {
+        my $expr := self.IMPL-UNWRAP-RANGE-EXPRESSION($source);
+        my int $reverse := 0;
+        if nqp::istype($expr, RakuAST::ApplyPostfix)
+            && nqp::istype($expr.postfix, RakuAST::Call::Method)
+            && $expr.postfix.name.canonicalize eq 'reverse'
+            && !(nqp::isconcrete($expr.postfix.args) && $expr.postfix.args.arity) {
+            $reverse := 1;
+            $expr := self.IMPL-UNWRAP-RANGE-EXPRESSION($expr.operand);
+        }
+
+        my $start-node;
+        my $end-node;
+        my int $start-extra := 0;
+        my int $end-extra   := 0;
+        if nqp::istype($expr, RakuAST::ApplyInfix)
+            && nqp::istype($expr.infix, RakuAST::Infix) {
+            my str $op := $expr.infix.operator;
+            return Mu
+                unless $op eq '..' || $op eq '..^' || $op eq '^..' || $op eq '^..^';
+            $start-extra := 1 if $op eq '^..' || $op eq '^..^';
+            $end-extra := -1 if $op eq '..^' || $op eq '^..^';
+            $start-node := $expr.left;
+            $end-node := $expr.right;
+        }
+        elsif nqp::istype($expr, RakuAST::ApplyPrefix)
+            && nqp::istype($expr.prefix, RakuAST::Prefix)
+            && $expr.prefix.operator eq '^' {
+            $end-node := $expr.operand;
+            $end-extra := -1;
+        }
+        else {
+            return Mu;
+        }
+
+        my $start-qast := $start-node
+            ?? self.IMPL-RANGE-BOUND-QAST($context, $start-node, $start-extra)
+            !! QAST::IVal.new( :value(0) );
+        return Mu if $start-qast =:= Mu;
+        my $end-qast := self.IMPL-RANGE-BOUND-QAST($context, $end-node, $end-extra);
+        return Mu if $end-qast =:= Mu;
+
+        my int $step := 1;
+        if $reverse {
+            my $swap := $start-qast;
+            $start-qast := $end-qast;
+            $end-qast := $swap;
+            $step := -1;
+        }
+
+        # Bind the iteration and end values into native int temporaries,
+        # and the body closure into a temporary. The iteration value
+        # starts one step early because the loop condition steps it.
+        my $it-name     := QAST::Node.unique('range_it');
+        my $last-name   := QAST::Node.unique('range_last');
+        my $callee-name := QAST::Node.unique('range_callee');
+        my $bind-it := QAST::Op.new( :op<bind>,
+            QAST::Var.new(
+                :name($it-name), :scope<local>, :decl<var>, :returns(int) ),
+            nqp::istype($start-qast, QAST::IVal)
+                ?? QAST::IVal.new( :value($start-qast.value - $step) )
+                !! QAST::Op.new( :op<sub_i>, :returns(int),
+                     $start-qast, QAST::IVal.new( :value($step) ) )
+        );
+        my $bind-last := QAST::Op.new( :op<bind>,
+            QAST::Var.new(
+                :name($last-name), :scope<local>, :decl<var>, :returns(int) ),
+            $end-qast
+        );
+        my $bind-callee := QAST::Op.new( :op<bind>,
+            QAST::Var.new( :name($callee-name), :scope<local>, :decl<var> ),
+            $body-qast
+        );
+
+        # Step the iteration value and call the body with it while it is
+        # on the start side of the end value.
+        my $loop := QAST::Op.new( :op<while>,
+            QAST::Op.new(
+                :op($step < 0 ?? 'isge_i' !! 'isle_i'),
+                QAST::Op.new( :op<bind>,
+                    QAST::Var.new( :name($it-name), :scope<local>, :returns(int) ),
+                    QAST::Op.new( :op<add_i>, :returns(int),
+                        QAST::Var.new( :name($it-name), :scope<local>, :returns(int) ),
+                        QAST::IVal.new( :value($step) )
+                    )
+                ),
+                QAST::Var.new( :name($last-name), :scope<local>, :returns(int) )
+            ),
+            QAST::Op.new( :op<call>,
+                QAST::Var.new( :name($callee-name), :scope<local> ),
+                QAST::Var.new( :name($it-name), :scope<local>, :returns(int) )
+            )
+        );
+
+        $context.ensure-sc($Nil);
+        self.IMPL-SET-NODE(
+            QAST::Stmts.new(
+                $bind-it,
+                $bind-last,
+                $bind-callee,
+                $loop,
+                QAST::WVal.new( :value($Nil) )
+            ), :key)
+    }
+
     # Whether a sunk statement-level for loop with the given body can
     # compile to the direct iterator-driven form. The body must be known
     # to take exactly one argument and have no loop phasers, which only

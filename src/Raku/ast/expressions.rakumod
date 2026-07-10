@@ -3768,6 +3768,14 @@ class RakuAST::Statement::For
     # The mode of evaluation, (defaults to serial, may be race or hyper also).
     has str $.mode;
 
+    # Set when the optimize pass has approved lowering a CORE integer-range
+    # source to a native counting loop.
+    has int $!can-lower-range;
+
+    method IMPL-SET-CAN-LOWER-RANGE() {
+        nqp::bindattr_i(self, RakuAST::Statement::For, '$!can-lower-range', 1)
+    }
+
     method new(
       RakuAST::Expression :$source!,
            RakuAST::Block :$body!,
@@ -3842,13 +3850,27 @@ class RakuAST::Statement::For
         if $mode eq 'serial' && $after-mode eq 'sink'
             && self.IMPL-CAN-USE-STATEMENT-FORM($!body) {
             my @lookups := self.IMPL-UNWRAP-LIST(self.get-implicit-lookups);
+            my $Nil := @lookups[1].resolution.compile-time-value;
+            my $body-qast := $!body.IMPL-TO-QAST($context);
+
+            # An integer-range source the optimize pass approved becomes a
+            # native counting loop, unless a bound turns out not to be a
+            # native-friendly integer.
+            if $!can-lower-range
+                && nqp::elems(@labels) == 0
+                && !$!body.has-any-phasers {
+                my $range-qast := self.IMPL-TO-QAST-RANGE(
+                    $context, $!source, $body-qast, $Nil);
+                return $range-qast unless $range-qast =:= Mu;
+            }
+
             return self.IMPL-TO-QAST-STATEMENT(
               $context,
               $!source.IMPL-TO-QAST($context),
-              $!body.IMPL-TO-QAST($context),
+              $body-qast,
               @labels ?? @labels[0] !! RakuAST::Label,
               @lookups[0].resolution.compile-time-value,
-              @lookups[1].resolution.compile-time-value
+              $Nil
             );
         }
 

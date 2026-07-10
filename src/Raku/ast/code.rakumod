@@ -1130,6 +1130,20 @@ class RakuAST::ScopePhaser {
         }
     }
 
+    method has-any-phasers() {
+        return True
+          if $!ENTER || $!LEAVE || $!KEEP  || $!UNDO || $!FIRST || $!NEXT
+          || $!LAST  || $!PRE   || $!POST  || $!QUIT || $!TEMP  || $!CLOSE
+          || $!let   || $!temp;
+        if nqp::istype(self, RakuAST::Meta) {
+            nqp::isconcrete(nqp::getattr(self.meta-object, Block, '$!phasers'))
+              ?? True !! False
+        }
+        else {
+            False
+        }
+    }
+
     method add-list-to-code-object(Str $attr, $code-object) {
         my $list := nqp::getattr(self, RakuAST::ScopePhaser, $attr);
         if $list {
