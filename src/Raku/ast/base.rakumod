@@ -926,9 +926,14 @@ class RakuAST::Node {
     # bound to a lexical variable has no compile-time value and throws, which
     # declines the lowering. A user `multi` or `sub` that shadows or extends the
     # operator produces a distinct routine object whose file may still read
-    # SETTING::, so the file alone is not enough: when the setting provides the
-    # name, the resolved routine must be the setting's very own. When it does not
-    # (the operator is being defined as CORE itself compiles), the file vouches.
+    # SETTING::, so the file alone is not enough. The name is resolved again in
+    # the scope of the node being offered: a lexical declaration is visible to
+    # that walk wherever it sits in its block, so a user operator declared after
+    # a use of the name still turns the lowering off, where the resolution
+    # stored on the node (made when the declaration had not been parsed yet)
+    # would still claim the CORE routine. When the walk reaches no declaration
+    # at all (the operator is being defined as CORE itself compiles), the file
+    # vouches.
     method IMPL-OPERATOR-IS-CORE(RakuAST::Resolver $resolver, Mu $operator) {
         CATCH {
             return False;
@@ -939,10 +944,10 @@ class RakuAST::Node {
         my str $category := nqp::istype($operator, RakuAST::Postfix) ?? '&postfix'
                          !! nqp::istype($operator, RakuAST::Prefix)  ?? '&prefix'
                          !! '&infix';
-        my $setting := $resolver.resolve-lexical-constant-in-setting(
+        my $current := $resolver.resolve-lexical(
           $category ~ $resolver.IMPL-CANONICALIZE-PAIR($operator.operator));
-        nqp::istype($setting, RakuAST::Declaration::External::Constant)
-          ?? nqp::eqaddr($routine, $setting.compile-time-value)
+        nqp::isconcrete($current)
+          ?? nqp::eqaddr($routine, nqp::decont($current.compile-time-value))
           !! True
     }
 
