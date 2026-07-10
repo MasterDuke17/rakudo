@@ -1115,6 +1115,21 @@ class RakuAST::ScopePhaser {
         nqp::getattr(self, RakuAST::ScopePhaser, '$!is-loop-body') // False
     }
 
+    method has-loop-phasers() {
+        return True if $!FIRST || $!NEXT || $!LAST;
+        if nqp::istype(self, RakuAST::Meta) {
+            my $phasers := nqp::getattr(self.meta-object, Block, '$!phasers');
+            nqp::ishash($phasers) && (
+                nqp::existskey($phasers, 'FIRST')
+                || nqp::existskey($phasers, 'NEXT')
+                || nqp::existskey($phasers, 'LAST')
+            ) ?? True !! False
+        }
+        else {
+            False
+        }
+    }
+
     method add-list-to-code-object(Str $attr, $code-object) {
         my $list := nqp::getattr(self, RakuAST::ScopePhaser, $attr);
         if $list {

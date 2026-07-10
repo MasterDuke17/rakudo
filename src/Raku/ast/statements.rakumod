@@ -178,6 +178,122 @@ class RakuAST::ForLoopImplementation
             $body-qast, $label // RakuAST::Label)
     }
 
+    # Whether a sunk statement-level for loop with the given body can
+    # compile to the direct iterator-driven form. The body must be known
+    # to take exactly one argument and have no loop phasers, which only
+    # the map-driven form runs.
+    method IMPL-CAN-USE-STATEMENT-FORM(RakuAST::Code $body) {
+        my $count := nqp::getattr(
+            nqp::getattr($body.meta-object, Code, '$!signature'),
+            Signature, '$!count');
+        nqp::isconcrete($count) && $count == 1 && !$body.has-loop-phasers
+    }
+
+    # The iterator-driven form for a sunk statement-level `for` loop.
+    # This drives the source's iterator directly rather than calling its
+    # `map` method, so a user-supplied `map` override never sees the
+    # loop. It only applies when the body takes exactly one argument and
+    # has no loop phasers, matching the legacy p6forstmt op.
+    method IMPL-TO-QAST-STATEMENT(RakuAST::IMPL::QASTContext $context,
+            Mu $source-qast, Mu $body-qast, RakuAST::Label $label,
+            Mu $IterationEnd, Mu $Nil) {
+        # Bind the source into a temporary.
+        my $for-target-name := QAST::Node.unique('for_target');
+        my $bind-target := QAST::Op.new(
+            :op('bind'),
+            QAST::Var.new( :name($for-target-name), :scope('local'), :decl('var') ),
+            $source-qast
+        );
+
+        # Get the iterator. A source in a container iterates as a single
+        # item, except a Slip, which flattens. Wrapping it with
+        # `infix:<,>` gives both.
+        my $iterator-name := QAST::Node.unique('for_iterator');
+        my $bind-iterator := QAST::Op.new(
+            :op('bind'),
+            QAST::Var.new( :name($iterator-name), :scope('local'), :decl('var') ),
+            QAST::Op.new(
+                :op('callmethod'), :name('iterator'),
+                QAST::Op.new(
+                    :op('if'),
+                    QAST::Op.new(
+                        :op('iscont'),
+                        QAST::Var.new( :name($for-target-name), :scope('local') )
+                    ),
+                    QAST::Op.new(
+                        :op('callstatic'), :name('&infix:<,>'),
+                        QAST::Var.new( :name($for-target-name), :scope('local') )
+                    ),
+                    QAST::Var.new( :name($for-target-name), :scope('local') )
+                )
+            )
+        );
+
+        $context.ensure-sc($IterationEnd);
+        my $iteration-end-name := QAST::Node.unique('for_iterationend');
+        my $bind-iteration-end := QAST::Op.new(
+            :op('bind'),
+            QAST::Var.new( :name($iteration-end-name), :scope('local'), :decl('var') ),
+            QAST::WVal.new( :value($IterationEnd) )
+        );
+
+        # Bind the underlying VM code ref of the body so each iteration
+        # invokes it without going through the code object.
+        my $block-name := QAST::Node.unique('for_block');
+        my $bind-block := QAST::Op.new(
+            :op('bind'),
+            QAST::Var.new( :name($block-name), :scope('local'), :decl('var') ),
+            QAST::Op.new(
+                :op('getattr'),
+                $body-qast,
+                QAST::WVal.new( :value(Code) ),
+                QAST::SVal.new( :value('$!do') )
+            )
+        );
+
+        # Pull values until IterationEnd, calling the body with each one.
+        my $iter-val-name := QAST::Node.unique('for_iterval');
+        my $loop := QAST::Op.new(
+            :op('until'),
+            QAST::Op.new(
+                :op('eqaddr'),
+                QAST::Op.new(
+                    :op('decont'),
+                    QAST::Op.new(
+                        :op('bind'),
+                        QAST::Var.new( :name($iter-val-name), :scope('local'), :decl('var') ),
+                        QAST::Op.new(
+                            :op('callmethod'), :name('pull-one'),
+                            QAST::Var.new( :name($iterator-name), :scope('local') )
+                        )
+                    )
+                ),
+                QAST::Var.new( :name($iteration-end-name), :scope('local') )
+            ),
+            QAST::Op.new(
+                :op('call'),
+                QAST::Var.new( :name($block-name), :scope('local') ),
+                QAST::Var.new( :name($iter-val-name), :scope('local') )
+            )
+        );
+        if $label {
+            my $label-qast := $label.IMPL-LOOKUP-QAST($context);
+            $label-qast.named('label');
+            $loop.push($label-qast);
+        }
+
+        $context.ensure-sc($Nil);
+        self.IMPL-SET-NODE(
+            QAST::Stmts.new(
+                $bind-target,
+                $bind-iterator,
+                $bind-iteration-end,
+                $bind-block,
+                $loop,
+                QAST::WVal.new( :value($Nil) )
+            ), :key)
+    }
+
     # The most general, least optimized, form for a `for` loop, which
     # delegates to `map`.
     method IMPL-TO-QAST-GENERAL(RakuAST::IMPL::QASTContext $context, str $mode,
@@ -738,7 +854,8 @@ class RakuAST::Statement::Expression
         if $!loop-modifier {
             my $sink := self.IMPL-DISCARD-RESULT;
             $qast := $!loop-modifier.IMPL-WRAP-QAST($context, $qast, :$sink,
-                :block(nqp::istype(self.expression, RakuAST::Block)));
+                :block(nqp::istype(self.expression, RakuAST::Block)),
+                :expression($!expression));
         }
         $qast
     }
