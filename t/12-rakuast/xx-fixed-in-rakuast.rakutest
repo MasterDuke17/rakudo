@@ -2,7 +2,7 @@ use Test;
 use lib <t/packages/Test-Helpers>;
 use Test::Helpers;
 
-plan 116;
+plan 122;
 
 # t/spec/S03-sequence/misc.t
 # https://github.com/rakudo/rakudo/issues/5520
@@ -860,6 +860,30 @@ subtest 'use of &?ROUTINE and &?BLOCK' => {
     $c = 8;
     todo "mixed named and positional args leak the native reference in legacy grammar" unless %*ENV<RAKUDO_RAKUAST>;
     is $s, 5, 'a native argument following a named argument is a snapshot';
+}
+
+# `require Foo:ver(...)` (and :auth/:api) built the dependency specification
+# with the whole adverbed name as the short-name and no matchers, so it
+# looked up a module literally named "Foo:ver<...>" and never found one.
+# The legacy grammar instead silently drops the adverbs and loads by base
+# name, so an unsatisfiable constraint is only enforced under RakuAST.
+{
+    lives-ok { require Test:ver<6.0.0+> },
+        'require loads a module through a satisfiable :ver constraint';
+    lives-ok { require Test:api },
+        'require loads a module with a bare boolean adverb';
+    is (do { require Test:ver<6.0.0+> }).^name, 'Test',
+        'a require with an adverb used as a block value returns the module';
+    {
+        require Test:ver<6.0.0+> <&pass>;
+        ok &pass ~~ Sub, 'a require with an adverb still imports the requested symbol';
+    }
+    todo "the legacy grammar ignores an unsatisfiable :ver on require" unless %*ENV<RAKUDO_RAKUAST>;
+    dies-ok { require Test:ver<999999.1> },
+        'require fails on an unsatisfiable :ver constraint';
+    todo "the legacy grammar ignores an unsatisfiable :auth on require" unless %*ENV<RAKUDO_RAKUAST>;
+    dies-ok { require Test:auth<nobody> },
+        'require fails on an unsatisfiable :auth constraint';
 }
 
 # vim: expandtab shiftwidth=4

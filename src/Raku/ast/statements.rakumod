@@ -2204,7 +2204,7 @@ class RakuAST::Statement::Require
                 self,
                 RakuAST::Statement::Require,
                 '$!module',
-                RakuAST::Package.new(:scope<my>, :name($!module-name.without-colonpair('file')), :is-require-stub),
+                RakuAST::Package.new(:scope<my>, :name($!module-name.without-colonpairs), :is-require-stub),
             );
             $!module.to-begin-time($resolver, $context);
             $!module.set-is-stub(True);
@@ -2230,7 +2230,7 @@ class RakuAST::Statement::Require
             }
         }
         else {
-            QAST::SVal.new(:value($!module-name.canonicalize))
+            QAST::SVal.new(:value($!module-name.canonicalize(:colonpairs(0))))
         }
     }
 
@@ -2252,6 +2252,22 @@ class RakuAST::Statement::Require
                 QAST::WVal.new(:value($depspec)),
                 $short-name,
             );
+            # Carry a `require Foo:ver(...):auth(...):api(...):from(...)`
+            # constraint into the dependency specification. Without this the
+            # adverbs stay in the short-name and the module is looked up under a
+            # name like "Foo:ver<...>", which never resolves.
+            my @adverb-keys   := ['ver', 'auth', 'api', 'from'];
+            my @matcher-names := ['version-matcher', 'auth-matcher', 'api-matcher', 'from'];
+            my int $i := 0;
+            while $i < 4 {
+                my $cp := $!module-name.first-colonpair(@adverb-keys[$i]);
+                if $cp {
+                    my $matcher := $cp.IMPL-VALUE-QAST($context);
+                    $matcher.named(@matcher-names[$i]);
+                    $spec.push($matcher);
+                }
+                $i := $i + 1;
+            }
             $compunit-qast := QAST::Op.new(
                 :op('callmethod'), :name('need'),
                 QAST::Op.new(
@@ -2340,7 +2356,7 @@ class RakuAST::Statement::Require
         $qast.push($require-qast);
         unless self.sunk {
             $qast.push: $!module-name
-                ?? $!module-name.IMPL-QAST-INDIRECT-LOOKUP($context)
+                ?? $!module-name.without-colonpairs.IMPL-QAST-INDIRECT-LOOKUP($context)
                 !! $!file.IMPL-TO-QAST($context);
         }
         $qast
