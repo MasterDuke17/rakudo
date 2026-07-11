@@ -1174,6 +1174,18 @@ class RakuAST::PackageInstaller {
     ### Consuming classes must define:
     #    method IMPL-GENERATE-LEXICAL-DECLARATION(RakuAST::Name $name, Mu $type-object) { ... }
 
+    # Worries from installing the symbol. Installation runs at BEGIN time,
+    # before the parser has attached the node's origin, so a worry raised
+    # right away could never carry the declaration's file and line. They
+    # are kept here and reported at check time instead.
+    has Mu $!install-worries;
+
+    method add-install-worries(RakuAST::Resolver $resolver) {
+        if nqp::isconcrete($!install-worries) {
+            $resolver.add-worry($_) for $!install-worries;
+        }
+    }
+
     method is-stub() { False }
     method defuse-stub() { }
 
@@ -1408,7 +1420,7 @@ class RakuAST::PackageInstaller {
         || $target-from-setting
     }
 
-    # Emit a SameNameAsEnclosing worry when a declaration silently
+    # Queue a SameNameAsEnclosing worry when a declaration silently
     # replaces its enclosing module or package with a non-container
     # kind on pre-6.e code. All gating lives here so the installer
     # call site stays readable.
@@ -1423,11 +1435,13 @@ class RakuAST::PackageInstaller {
                 nqp::istype($type-object.HOW, Perl6::Metamodel::ModuleHOW)
                 || nqp::istype($type-object.HOW, Perl6::Metamodel::PackageHOW);
             if $enclosing-kind ne '' && !$inner-is-containerlike {
-                $resolver.add-worry: $resolver.build-exception:
+                nqp::bindattr(self, RakuAST::PackageInstaller, '$!install-worries', [])
+                  unless nqp::isconcrete($!install-worries);
+                nqp::push($!install-worries, $resolver.build-exception(
                     'X::Package::SameNameAsEnclosing',
                     :kind(self.declarator),
                     :enclosing-kind($enclosing-kind),
-                    :name($existing.HOW.name($existing));
+                    :name($existing.HOW.name($existing))));
             }
         }
     }
