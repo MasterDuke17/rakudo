@@ -95,7 +95,8 @@ class RakuAST::TraitTarget {
                 }
                 my $name := (try $_.name.canonicalize) // '';
                 if is-traits-to-warn-on-duplicate{$name} && %seen{$name}++ {
-                    $resolver.add-worry: $resolver.build-exception: 'X::AdHoc', :payload("Duplicate '" ~ $_.IMPL-TRAIT-NAME() ~ " $name' trait");
+                    nqp::bindattr(self, RakuAST::TraitTarget, '$!worries', []) unless nqp::isconcrete($!worries);
+                    nqp::push($!worries, $resolver.build-exception('X::AdHoc', :payload("Duplicate '" ~ $_.IMPL-TRAIT-NAME() ~ " $name' trait")));
                 }
             }
         }

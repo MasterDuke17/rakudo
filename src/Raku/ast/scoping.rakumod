@@ -1180,9 +1180,9 @@ class RakuAST::PackageInstaller {
     # are kept here and reported at check time instead.
     has Mu $!install-worries;
 
-    method add-install-worries(RakuAST::Resolver $resolver) {
+    method add-install-worries() {
         if nqp::isconcrete($!install-worries) {
-            $resolver.add-worry($_) for $!install-worries;
+            self.add-worry($_) for $!install-worries;
         }
     }
 

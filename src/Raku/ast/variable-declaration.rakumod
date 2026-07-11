@@ -1297,7 +1297,7 @@ class RakuAST::VarDeclaration::Simple
 
         if self.twigil eq '.' && !self.is-attribute && !$!attribute-package {
             my $package := nqp::getlexdyn('$?PACKAGE');
-            $resolver.add-worry:
+            self.add-worry:
                 $resolver.build-exception('X::AdHoc', payload => "Useless generation of accessor method in " ~
                 (nqp::istype($package.HOW, Perl6::Metamodel::AttributeContainer)
                     ?? $package.HOW.name($package)
