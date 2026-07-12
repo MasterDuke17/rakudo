@@ -1040,6 +1040,7 @@ class RakuAST::Type::Enum
 
     method PERFORM-CHECK(RakuAST::Resolver $resolver, RakuAST::IMPL::QASTContext $context) {
         self.add-trait-sorries;
+        self.add-install-worries;
 
         self.check-scope($resolver, 'enum');
 
@@ -1251,6 +1252,7 @@ class RakuAST::Type::Subset
 
     method PERFORM-CHECK(RakuAST::Resolver $resolver, RakuAST::IMPL::QASTContext $context) {
         self.add-trait-sorries;
+        self.add-install-worries;
 
         self.check-scope($resolver, 'subset');
     }

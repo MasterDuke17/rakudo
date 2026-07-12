@@ -2703,14 +2703,14 @@ class RakuAST::Methodish
                 $package.ATTACH-METHOD(self) if self.scope eq 'has';
             }
             elsif self.scope eq 'has' {
-                $resolver.add-worry:  # XXX should be self.add-worry
+                self.add-worry:
                   $resolver.build-exception: 'X::Useless::Declaration',
                     name  => $name,
                     where => "a " ~ $package.parsed-declarator
             }
         }
         elsif self.scope eq 'has' {
-            $resolver.add-worry:  # XXX should be self.add-worry
+            self.add-worry:
               $resolver.build-exception: 'X::Useless::Declaration',
                 name  => $name,
                 where => 'the mainline';

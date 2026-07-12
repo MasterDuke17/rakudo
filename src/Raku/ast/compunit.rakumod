@@ -193,7 +193,7 @@ class RakuAST::CompUnit
     # during optimization, though will not do any transforms in and of itself.
     method check(RakuAST::Resolver $resolver) {
         if @*LEADING-DOC {
-            $resolver.add-worry:
+            self.add-worry:
               $resolver.build-exception:
                 'X::Syntax::Doc::Declarator::MissingDeclarand',
                 :position<leading>;

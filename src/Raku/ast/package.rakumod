@@ -311,6 +311,7 @@ class RakuAST::Package
         self.check-scope($resolver, self.declarator);
 
         self.add-trait-sorries;
+        self.add-install-worries;
 
         if $!is-stub && !$!stub-defused && !$!is-require-stub
             && !self.stubbed-meta-object.HOW.is_composed(self.stubbed-meta-object)
