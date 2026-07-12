@@ -2839,6 +2839,48 @@ sub multi-ambiguous-handler($ambig-call, $target, $capture) {
     );
 }
 
+# Whether two signatures are interchangeable for revision gating: the
+# same parameter shapes and types in the same order, differing at most
+# in parameter names. Anything a name-blind comparison cannot vouch for
+# (named, slurpy, capture or sub-signature parameters, constraints,
+# type captures) makes them non-interchangeable, so such candidates
+# each stand on their own, as any two distinct signatures do.
+sub revision-gated-signatures-equivalent($sig-a, $sig-b) {
+    my @params-a := nqp::getattr($sig-a, Signature, '@!params');
+    my @params-b := nqp::getattr($sig-b, Signature, '@!params');
+    return 0 unless nqp::elems(@params-a) == nqp::elems(@params-b);
+
+    my int $n := nqp::elems(@params-a);
+    my int $i := -1;
+    while ++$i < $n {
+        my $a := nqp::atpos(@params-a, $i);
+        my $b := nqp::atpos(@params-b, $i);
+
+        my int $flags := nqp::getattr_i($a, Parameter, '$!flags');
+        return 0 unless $flags == nqp::getattr_i($b, Parameter, '$!flags');
+        return 0 if $flags +& (nqp::const::SIG_ELEM_SLURPY_POS
+                            +| nqp::const::SIG_ELEM_SLURPY_NAMED
+                            +| nqp::const::SIG_ELEM_SLURPY_LOL
+                            +| nqp::const::SIG_ELEM_SLURPY_ONEARG
+                            +| nqp::const::SIG_ELEM_IS_CAPTURE);
+        return 0 unless nqp::isnull(nqp::getattr($a, Parameter, '@!named_names'))
+                     && nqp::isnull(nqp::getattr($b, Parameter, '@!named_names'));
+        return 0 unless nqp::isnull(nqp::getattr($a, Parameter, '@!post_constraints'))
+                     && nqp::isnull(nqp::getattr($b, Parameter, '@!post_constraints'));
+        return 0 unless nqp::isnull(nqp::getattr($a, Parameter, '@!type_captures'))
+                     && nqp::isnull(nqp::getattr($b, Parameter, '@!type_captures'));
+        return 0 if nqp::getattr($a, Parameter, '$!sub_signature')
+                 || nqp::getattr($b, Parameter, '$!sub_signature');
+        return 0 if nqp::defined(nqp::getattr($a, Parameter, '$!signature_constraint'))
+                 || nqp::defined(nqp::getattr($b, Parameter, '$!signature_constraint'));
+
+        return 0 unless nqp::eqaddr(
+            nqp::getattr($a, Parameter, '$!type'),
+            nqp::getattr($b, Parameter, '$!type'));
+    }
+    1
+}
+
 # Helper sub to filter out revision-gated multi-candidates
 sub multi-filter-revision-gated-candidates($proto, $caller-revision) {
     my @candidates := $proto.dispatch_order;
@@ -2848,6 +2890,7 @@ sub multi-filter-revision-gated-candidates($proto, $caller-revision) {
     my int $allowed-idx := 0;
     my @allowed-candidates;
     my %gated-candidates;
+    my @gated-idxs;
     while $idx < nqp::elems(@candidates) {
         my $candidate := nqp::atpos(@candidates, $idx++);
 
@@ -2861,23 +2904,43 @@ sub multi-filter-revision-gated-candidates($proto, $caller-revision) {
         my $required-revision := nqp::atkey($candidate, 'required_revision') // $proto-revision;
         if $required-revision <= $caller-revision {
             if nqp::existskey($candidate, 'signature') {
-                my $signature := nqp::atkey($candidate, 'signature').gist;
+                my $sig := nqp::atkey($candidate, 'signature');
+                my $signature := $sig.gist;
 
+                # Find the admitted candidate this one supersedes or is
+                # superseded by. The rendered signature catches the exact
+                # same text cheaply; the structural comparison catches
+                # signatures that differ in parameter names only.
+                my int $candidate-idx := -1;
                 if nqp::existskey(%gated-candidates, $signature) {
-                    my $candidate-idx := nqp::atkey(%gated-candidates, $signature);
+                    $candidate-idx := nqp::atkey(%gated-candidates, $signature);
+                }
+                else {
+                    for @gated-idxs {
+                        if revision-gated-signatures-equivalent($sig,
+                            nqp::atkey(nqp::atpos(@allowed-candidates, $_), 'signature')) {
+                            $candidate-idx := $_;
+                            last;
+                        }
+                    }
+                }
+
+                if $candidate-idx >= 0 {
                     my $last-seen-revision := nqp::atkey(
                         nqp::atpos(@allowed-candidates, $candidate-idx),
                         'required_revision'
                     );
 
                     if $last-seen-revision < $required-revision {
-                        nqp::bindkey(%gated-candidates, $signature, $candidate-idx);
                         nqp::bindpos(@allowed-candidates, $candidate-idx, $candidate);
                         # Do *not* bump $allowed-idx here
                     }
+                    nqp::bindkey(%gated-candidates, $signature, $candidate-idx);
                 } else {
+                    nqp::bindkey(%gated-candidates, $signature, $allowed-idx);
+                    nqp::push(@gated-idxs, $allowed-idx);
                     nqp::push(@allowed-candidates, $candidate);
-                    nqp::bindkey(%gated-candidates, $signature, $allowed-idx++);
+                    $allowed-idx++;
                 }
             } else {
                 nqp::push(@allowed-candidates, $candidate);
