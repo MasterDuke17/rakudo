@@ -2477,40 +2477,48 @@ class RakuAST::Sub
         # at compile time, so a signature carrying either is left out of the check.
         return Nil unless self.IMPL-SIGNATURE-STATICALLY-COMPARABLE($signature);
 
-        # If there is a revision gated proto, we don't want to worry about throwing
-        # re-declaration exceptions. Otherwise, crawl the candidates and ensure that
-        # none of them double up.
-        #
-        # TODO: Make this handle the case of clashing revision gated candidates
-        # TODO: rather than simply ignore the check for revision gating as is
-        # TODO: currently done.
-        if !(nqp::can($proto, 'REQUIRED-REVISION') && $proto.REQUIRED-REVISION) {
-            my @seen-accepts;
-            for $proto.dispatchees {
-                last if $_.can("default");
-                next if $_ =:= $meta;
+        # Crawl the candidates and ensure that none of them double up. For a
+        # revision gated proto, equivalent signatures gated at different
+        # revisions are how a routine evolves per language version, so only
+        # candidates competing at the same effective revision are compared.
+        # A candidate without its own gate defaults to the proto's revision,
+        # as it does at dispatch time.
+        my $proto-revision := nqp::can($proto, 'REQUIRED-REVISION') && $proto.REQUIRED-REVISION;
+        my $self-revision := $proto-revision
+            ?? (nqp::can($meta, 'REQUIRED-REVISION') ?? $meta.REQUIRED-REVISION !! $proto-revision)
+            !! Nil;
+        my @seen-accepts;
+        for $proto.dispatchees {
+            last if $_.can("default");
+            next if $_ =:= $meta;
 
-                my $other-signature := $_.signature;
-                next unless $signature.arity == $other-signature.arity;
-                next unless self.IMPL-SIGNATURE-STATICALLY-COMPARABLE($other-signature);
+            if $proto-revision {
+                my $other-revision := nqp::can($_, 'REQUIRED-REVISION')
+                    ?? $_.REQUIRED-REVISION
+                    !! $proto-revision;
+                next unless $other-revision == $self-revision;
+            }
 
-                @seen-accepts.push($_)
-                    if try $other-signature.ACCEPTS($signature)
-                        && try $signature.ACCEPTS($other-signature);
+            my $other-signature := $_.signature;
+            next unless $signature.arity == $other-signature.arity;
+            next unless self.IMPL-SIGNATURE-STATICALLY-COMPARABLE($other-signature);
 
-                if @seen-accepts > 0 {
-                    my %args;
-                    if my $origin := self.origin {
-                        my $origin-match := self.origin.as-match;
-                        %args<filename>   := $origin-match.file;
-                        %args<line> := $origin-match.line
-                    }
-                    self.add-worry: $resolver.build-exception:
-                            'X::Redeclaration::Multi',
-                            :symbol(self.name.canonicalize),
-                            :ambiguous(@seen-accepts),
-                            |%args;
+            @seen-accepts.push($_)
+                if try $other-signature.ACCEPTS($signature)
+                    && try $signature.ACCEPTS($other-signature);
+
+            if @seen-accepts > 0 {
+                my %args;
+                if my $origin := self.origin {
+                    my $origin-match := self.origin.as-match;
+                    %args<filename>   := $origin-match.file;
+                    %args<line> := $origin-match.line
                 }
+                self.add-worry: $resolver.build-exception:
+                        'X::Redeclaration::Multi',
+                        :symbol(self.name.canonicalize),
+                        :ambiguous(@seen-accepts),
+                        |%args;
             }
         }
     }

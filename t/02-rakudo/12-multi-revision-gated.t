@@ -1,8 +1,9 @@
 use lib <t/packages/Test-Helpers>;
+use nqp;
 use Test;
 use Test::Helpers;
 
-plan 6;
+plan 8;
 
 my $to-eval = q:to/END/;
 
@@ -53,3 +54,16 @@ END
 
 is-run 'use v6.c;' ~ $clashing-to-eval, :err(*),
         :out("first (6)"), 'same-revision equivalent candidates dispatch to one candidate';
+
+# The compile time redeclaration worry is a RakuAST frontend check.
+if nqp::gethllsym('Raku', 'COMPILER-FRONTEND') eq 'rakuast' {
+    is-run 'use v6.c;' ~ $clashing-to-eval,
+            :err(/'equivalent signatures'/), :out(*),
+            'same-revision equivalent candidates get the redeclaration worry';
+    is-run 'use v6.c;' ~ $renamed-to-eval,
+            :err(''), :out(*),
+            'candidates gated at different revisions do not get the redeclaration worry';
+}
+else {
+    skip 'the redeclaration worry needs the RakuAST frontend', 2;
+}
