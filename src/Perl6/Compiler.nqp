@@ -289,6 +289,13 @@ class Perl6::Compiler is HLL::Compiler {
         my str $setting-name := nqp::can($rakuast, 'setting-name') ?? ($rakuast.setting-name // '') !! '';
         my int $compiling-core := $setting-name eq 'NULL.c' || $setting-name eq 'NULL.d' || $setting-name eq 'NULL.e' ?? 1 !! 0;
         my $*COMPILING_CORE_SETTING := $compiling-core;
+        # An EVAL during QAST generation (a node building a value object at
+        # compile time, like the format string literal) checks $*CU to nest
+        # inside this compilation and share its serialization context. The
+        # parse actions bind it during the parse stage; rebind it here so
+        # such EVALs don't compile into an ephemeral context that breaks
+        # precompilation.
+        my $*CU := $rakuast;
         my $comp_unit := $rakuast.IMPL-TO-QAST-COMP-UNIT;
         $rakuast.cleanup();
         $comp_unit;
