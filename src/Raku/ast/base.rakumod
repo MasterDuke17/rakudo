@@ -713,6 +713,7 @@ class RakuAST::Node {
             self.IMPL-MARK-NATIVE-METAOP($resolver, $expr);
             self.IMPL-MARK-SCALAR-METAOP($resolver, $expr);
             self.IMPL-MARK-DOT-ASSIGN($resolver, $expr);
+            self.IMPL-MARK-RANGE-FOR($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -861,6 +862,36 @@ class RakuAST::Node {
         Nil
     }
 
+    # Mark a for loop whose source is an integer range built by a CORE range
+    # constructor (`..` and its exclusive variants, prefix `^`, or `reverse`
+    # of one) for lowering to a native counting loop at code generation. Both
+    # the statement form and the statement modifier form qualify. Only the
+    # source shape and the operator's origin are decided here; code generation
+    # checks the loop itself (sunk, serial, simple body) and the bounds, and
+    # falls back to the ordinary compilation when those disqualify.
+    method IMPL-MARK-RANGE-FOR(RakuAST::Resolver $resolver, Mu $expr) {
+        my $for;
+        if nqp::istype($expr, RakuAST::Statement::For) {
+            $for := $expr;
+        }
+        elsif nqp::istype($expr, RakuAST::Statement::Expression)
+            && nqp::isconcrete($expr.loop-modifier)
+            && nqp::istype($expr.loop-modifier, RakuAST::StatementModifier::For) {
+            $for := $expr.loop-modifier;
+        }
+        else {
+            return Nil;
+        }
+        my $source := nqp::istype($for, RakuAST::Statement::For)
+            ?? $for.source
+            !! $for.expression;
+        my $operator := $for.IMPL-RANGE-FOR-OPERATOR($source);
+        $for.IMPL-SET-CAN-LOWER-RANGE()
+            if nqp::isconcrete($operator)
+            && self.IMPL-OPERATOR-IS-CORE($resolver, $operator);
+        Nil
+    }
+
     # Inline a dot-assignment to an assignment of the method call's result,
     # dropping the dispatcher. The call arrives as a `dispatch:<.=>` callmethod
     # whose first child is the target and whose second is the method name. The
@@ -895,9 +926,14 @@ class RakuAST::Node {
     # bound to a lexical variable has no compile-time value and throws, which
     # declines the lowering. A user `multi` or `sub` that shadows or extends the
     # operator produces a distinct routine object whose file may still read
-    # SETTING::, so the file alone is not enough: when the setting provides the
-    # name, the resolved routine must be the setting's very own. When it does not
-    # (the operator is being defined as CORE itself compiles), the file vouches.
+    # SETTING::, so the file alone is not enough. The name is resolved again in
+    # the scope of the node being offered: a lexical declaration is visible to
+    # that walk wherever it sits in its block, so a user operator declared after
+    # a use of the name still turns the lowering off, where the resolution
+    # stored on the node (made when the declaration had not been parsed yet)
+    # would still claim the CORE routine. When the walk reaches no declaration
+    # at all (the operator is being defined as CORE itself compiles), the file
+    # vouches.
     method IMPL-OPERATOR-IS-CORE(RakuAST::Resolver $resolver, Mu $operator) {
         CATCH {
             return False;
@@ -908,10 +944,10 @@ class RakuAST::Node {
         my str $category := nqp::istype($operator, RakuAST::Postfix) ?? '&postfix'
                          !! nqp::istype($operator, RakuAST::Prefix)  ?? '&prefix'
                          !! '&infix';
-        my $setting := $resolver.resolve-lexical-constant-in-setting(
+        my $current := $resolver.resolve-lexical(
           $category ~ $resolver.IMPL-CANONICALIZE-PAIR($operator.operator));
-        nqp::istype($setting, RakuAST::Declaration::External::Constant)
-          ?? nqp::eqaddr($routine, $setting.compile-time-value)
+        nqp::isconcrete($current)
+          ?? nqp::eqaddr($routine, nqp::decont($current.compile-time-value))
           !! True
     }
 

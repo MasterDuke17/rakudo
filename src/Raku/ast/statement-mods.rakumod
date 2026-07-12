@@ -222,7 +222,7 @@ class RakuAST::StatementModifier::WhileUntil
         ]
     }
 
-    method IMPL-WRAP-QAST(RakuAST::IMPL::QASTContext $context, Mu $statement-qast, Bool :$sink, Bool :$block) {
+    method IMPL-WRAP-QAST(RakuAST::IMPL::QASTContext $context, Mu $statement-qast, Bool :$sink, Bool :$block, Mu :$expression) {
         if $sink {
             QAST::Op.new(
                 :op(self.negate ?? 'until' !! 'while'),
@@ -275,7 +275,7 @@ class RakuAST::StatementModifier::Given
 {
     method handles-condition() { False }
 
-    method IMPL-WRAP-QAST(RakuAST::IMPL::QASTContext $context, Mu $statement-qast, Bool :$sink, Bool :$block) {
+    method IMPL-WRAP-QAST(RakuAST::IMPL::QASTContext $context, Mu $statement-qast, Bool :$sink, Bool :$block, Mu :$expression) {
         if $block {
             if $sink {
                 $statement-qast[0].push(self.expression.IMPL-TO-QAST($context));
@@ -298,27 +298,74 @@ class RakuAST::StatementModifier::Given
 class RakuAST::StatementModifier::For
   is RakuAST::StatementModifier::Loop
   is RakuAST::ForLoopImplementation
+  is RakuAST::ImplicitLookups
 {
-    method IMPL-WRAP-QAST(RakuAST::IMPL::QASTContext $context, Mu $statement-qast, Bool :$sink, Bool :$block) {
-        my $expression := self.expression;
-        my $expression-qast := $expression.IMPL-TO-QAST($context);
+    # Set when the optimize pass has approved lowering a CORE integer-range
+    # source to a native counting loop.
+    has int $!can-lower-range;
+
+    method IMPL-SET-CAN-LOWER-RANGE() {
+        nqp::bindattr_i(self, RakuAST::StatementModifier::For, '$!can-lower-range', 1)
+    }
+
+    method PRODUCE-IMPLICIT-LOOKUPS() {
+        [
+            RakuAST::Var::Lexical::Setting.new(
+                :desigilname(RakuAST::Name.from-identifier('IterationEnd'))),
+            RakuAST::Type::Setting.new(RakuAST::Name.from-identifier('Nil')),
+        ]
+    }
+
+    method IMPL-WRAP-QAST(RakuAST::IMPL::QASTContext $context, Mu $statement-qast, Bool :$sink, Bool :$block, Mu :$expression) {
+        my $source := self.expression;
+        my $source-qast := $source.IMPL-TO-QAST($context);
         $statement-qast := $sink ?? $statement-qast[0][0] !! $statement-qast[0] if $block;
 
-        nqp::istype($expression, RakuAST::QuotedRegex)
-                        ??
-            self.IMPL-TEMPORARIZE-TOPIC(
-                $expression-qast,
-                self.IMPL-FOR-QAST(
-                    $context, 'serial',
-                    ($sink ?? 'sink' !! 'eager'),
-                    $expression-qast,
-                    $statement-qast))
-                        !!
-             self.IMPL-FOR-QAST(
+        # A sunk modifier for loop with a simple enough body iterates its
+        # source directly rather than delegating to its map method. A
+        # thunked statement always takes the one topic argument; an
+        # explicit block is checked like the statement form.
+        my $for-qast;
+        if $sink && ($block
+            ?? nqp::istype($expression, RakuAST::Code)
+                 && self.IMPL-CAN-USE-STATEMENT-FORM($expression)
+            !! True) {
+            my @lookups := self.IMPL-UNWRAP-LIST(self.get-implicit-lookups);
+            my $Nil := @lookups[1].resolution.compile-time-value;
+
+            # An integer-range source the optimize pass approved becomes a
+            # native counting loop, unless a bound turns out not to be a
+            # native-friendly integer.
+            if $!can-lower-range
+                && !($block && nqp::istype($expression, RakuAST::Code)
+                      && $expression.has-any-phasers) {
+                $for-qast := self.IMPL-TO-QAST-RANGE(
+                    $context, $source, $statement-qast, $Nil);
+            }
+
+            if !nqp::isconcrete($for-qast) {
+                $for-qast := self.IMPL-TO-QAST-STATEMENT(
+                    $context,
+                    $source-qast,
+                    $statement-qast,
+                    RakuAST::Label,
+                    @lookups[0].resolution.compile-time-value,
+                    $Nil
+                );
+            }
+        }
+        else {
+            $for-qast := self.IMPL-FOR-QAST(
                 $context, 'serial',
                 ($sink ?? 'sink' !! 'eager'),
-                $expression-qast,
-                $statement-qast)
+                $source-qast,
+                $statement-qast
+            );
+        }
+
+        nqp::istype($source, RakuAST::QuotedRegex)
+            ?? self.IMPL-TEMPORARIZE-TOPIC($source-qast, $for-qast)
+            !! $for-qast
     }
 
     method expression-thunk() {

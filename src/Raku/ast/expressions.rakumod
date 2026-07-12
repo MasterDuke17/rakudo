@@ -3799,6 +3799,7 @@ class RakuAST::Statement::For
   is RakuAST::SinkPropagator
   is RakuAST::BlockStatementSensitive
   is RakuAST::ImplicitBlockSemanticsProvider
+  is RakuAST::ImplicitLookups
 {
     # The thing to iterate over.
     has RakuAST::Expression $.source;
@@ -3811,6 +3812,14 @@ class RakuAST::Statement::For
 
     # The mode of evaluation, (defaults to serial, may be race or hyper also).
     has str $.mode;
+
+    # Set when the optimize pass has approved lowering a CORE integer-range
+    # source to a native counting loop.
+    has int $!can-lower-range;
+
+    method IMPL-SET-CAN-LOWER-RANGE() {
+        nqp::bindattr_i(self, RakuAST::Statement::For, '$!can-lower-range', 1)
+    }
 
     method new(
       RakuAST::Expression :$source!,
@@ -3855,6 +3864,14 @@ class RakuAST::Statement::For
         # Avoid worries about sink context
     }
 
+    method PRODUCE-IMPLICIT-LOOKUPS() {
+        [
+            RakuAST::Var::Lexical::Setting.new(
+                :desigilname(RakuAST::Name.from-identifier('IterationEnd'))),
+            RakuAST::Type::Setting.new(RakuAST::Name.from-identifier('Nil')),
+        ]
+    }
+
     method IMPL-TO-QAST(RakuAST::IMPL::QASTContext $context) {
         # Figure out the execution mode modifiers to apply.
         my str $mode := $!mode;
@@ -3871,10 +3888,40 @@ class RakuAST::Statement::For
             $after-mode := self.IMPL-DISCARD-RESULT ?? 'sink' !! 'eager';
         }
 
+        my @labels := self.IMPL-UNWRAP-LIST(self.labels);
+
+        # A sunk serial for loop with a simple enough body iterates its
+        # source directly rather than delegating to its map method.
+        if $mode eq 'serial' && $after-mode eq 'sink'
+            && self.IMPL-CAN-USE-STATEMENT-FORM($!body) {
+            my @lookups := self.IMPL-UNWRAP-LIST(self.get-implicit-lookups);
+            my $Nil := @lookups[1].resolution.compile-time-value;
+            my $body-qast := $!body.IMPL-TO-QAST($context);
+
+            # An integer-range source the optimize pass approved becomes a
+            # native counting loop, unless a bound turns out not to be a
+            # native-friendly integer.
+            if $!can-lower-range
+                && nqp::elems(@labels) == 0
+                && !$!body.has-any-phasers {
+                my $range-qast := self.IMPL-TO-QAST-RANGE(
+                    $context, $!source, $body-qast, $Nil);
+                return $range-qast unless $range-qast =:= Mu;
+            }
+
+            return self.IMPL-TO-QAST-STATEMENT(
+              $context,
+              $!source.IMPL-TO-QAST($context),
+              $body-qast,
+              @labels ?? @labels[0] !! RakuAST::Label,
+              @lookups[0].resolution.compile-time-value,
+              $Nil
+            );
+        }
+
         # Delegate to the for loop compilation helper (which we pass various
         # attributes to in order to make it callable for the statement modifier
         # form also).
-        my @labels := self.IMPL-UNWRAP-LIST(self.labels);
         my $qast := self.IMPL-FOR-QAST(
           $context,
           $mode,
