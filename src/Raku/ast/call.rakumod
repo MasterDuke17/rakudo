@@ -543,7 +543,61 @@ class RakuAST::Call::Name
             $call.push(QAST::WVal.new(:value($ret.maybe-compile-time-value)));
         }
 
-        self.IMPL-SIMPLIFY-REF-ARGS($call)
+        my $qast := self.IMPL-SIMPLIFY-REF-ARGS($call);
+        $!callstatic ?? self.IMPL-COPY-RETURNS($qast) !! $qast
+    }
+
+    # Copy the resolved callee's declared return type onto the call node, so
+    # code generation downstream may act on it. A native return is offered
+    # both ways through a Want: boxed for object context and raw for native
+    # context. Only a callee bound once is trusted, the condition the static
+    # callee lookup already established, and a dispatcher is left alone since
+    # its candidates decide their own returns, as is an rw callee, whose
+    # return is its container.
+    method IMPL-COPY-RETURNS(Mu $call) {
+        # The attribute reads assume the stock Routine layout; a routine of
+        # another lineage declines rather than breaks the compile.
+        CATCH {
+            return $call;
+        }
+        my constant BOX-OPS := ['', 'p6box_i', 'p6box_n', 'p6box_s',
+            '', '', '', '', '', '', 'p6box_u'];
+        my constant WANT-FLAGS := ['', 'Ii', 'Nn', 'Ss',
+            '', '', '', '', '', '', 'Ii'];
+        my $decl := self.resolution;
+        return $call unless nqp::istype($decl, RakuAST::CompileTimeValue)
+            || nqp::can($decl, 'maybe-compile-time-value');
+        my $routine := nqp::istype($decl, RakuAST::CompileTimeValue)
+            ?? $decl.compile-time-value
+            !! $decl.maybe-compile-time-value;
+        # An our-scoped callee imports as its Scalar container, whose value a
+        # later assignment can replace, so it promises no return type.
+        return $call if nqp::iscont($routine);
+        return $call unless nqp::isconcrete($routine)
+            && nqp::istype($routine, Routine);
+        # Attribute reads rather than the rw, is_dispatcher, and returns
+        # methods: this runs for every marked call, and dispatching against
+        # the setting's own meta-objects during its compile is pathologically
+        # slow in the compiling process.
+        return $call if nqp::bitand_i(
+            nqp::getattr_i($routine, Routine, '$!flags'), 0x01);
+        return $call if nqp::defined(
+            nqp::getattr($routine, Routine, '@!dispatchees'));
+        my $signature := nqp::getattr($routine, Code, '$!signature');
+        return $call unless nqp::isconcrete($signature);
+        my $returns := nqp::ifnull(
+            nqp::getattr($signature, Signature, '$!returns'), Mu);
+        return $call if $returns =:= Mu;
+        $call.returns($returns);
+        my int $primspec := nqp::objprimspec($returns);
+        if $primspec && BOX-OPS[$primspec] {
+            $call := QAST::Want.new(
+                :named($call.named),
+                QAST::Op.new( :op(BOX-OPS[$primspec]), $call ),
+                WANT-FLAGS[$primspec], $call);
+            $call.returns($returns);
+        }
+        $call
     }
 
     method IMPL-CAN-INTERPRET() {
