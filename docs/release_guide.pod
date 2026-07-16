@@ -218,6 +218,11 @@ where it sucks in the entire Changelog if this release's entries are there.
 That's why the changes to the Changelog are in the next step - this way the
 script will not read in any of ChangeLog.
 
+Note: When copying the changelog into the announcement - remove the commit ids.
+These don't belong in the release info. Feel free to re-word and combine entries
+in the changelog, especially in the copy in the release announcement - they don't
+have to match line for line.
+
 =item *
 
 Add the ChangeLog material from the wiki to the top of C<docs/ChangeLog>.
