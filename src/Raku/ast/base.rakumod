@@ -888,18 +888,55 @@ class RakuAST::Node {
         Nil
     }
 
-    # Mark a call to a named sub that resolved to a setting routine for a
-    # static callee lookup at code generation. The setting binds each routine
-    # name once and user code cannot rebind it, so the VM may resolve the
-    # lookup a single time and treat the result as a constant. A name declared
-    # in user code stays a plain lookup even when it resolves at compile time,
-    # since its binding may be a fresh clone per scope entry.
+    # Mark a call to a named sub whose callee lexical is bound once for a
+    # static callee lookup at code generation, so the VM may resolve the
+    # lookup a single time and treat the result as a constant. Two kinds of
+    # callee qualify. A setting routine: the setting binds each routine name
+    # once and user code cannot rebind it. And a compile-time-valued binding
+    # in the outermost scope of the compilation unit (a sub declaration or an
+    # import), since that scope's frame is entered once per load and a sub
+    # declaration cannot be rebound. A declaration without a compile-time
+    # value, like `my &foo`, stays a plain lookup: its binding is free to be
+    # rebound at runtime. A routine declared in a nested scope also stays a
+    # plain lookup, since its enclosing frame is entered many times and each
+    # entry may bind a fresh clone. A callee compiled under the soft pragma
+    # keeps the plain lookup so it stays wrappable.
     method IMPL-MARK-STATIC-CALL(RakuAST::Resolver $resolver, Mu $expr) {
-        $expr.IMPL-SET-CALLSTATIC()
-            if nqp::istype($expr, RakuAST::Call::Name)
+        return Nil unless nqp::istype($expr, RakuAST::Call::Name)
             && $expr.name.is-identifier
-            && $expr.is-resolved
-            && nqp::istype($expr.resolution, RakuAST::Declaration::External::Setting);
+            && $expr.is-resolved;
+        my $decl := $expr.resolution;
+        if nqp::istype($decl, RakuAST::Declaration::External::Setting) {
+            $expr.IMPL-SET-CALLSTATIC();
+            return Nil;
+        }
+
+        return Nil unless nqp::istype($decl, RakuAST::CompileTimeValue)
+            || nqp::can($decl, 'maybe-compile-time-value');
+        my $routine := nqp::istype($decl, RakuAST::CompileTimeValue)
+            ?? $decl.compile-time-value
+            !! $decl.maybe-compile-time-value;
+        return Nil unless nqp::isconcrete($routine)
+            && nqp::istype($routine, Code)
+            && nqp::can($routine, 'soft') && !$routine.soft;
+
+        # The nearest scope declaring the name must be the outermost one, and
+        # the declaration found there must be the resolution itself, so a
+        # shadowing declaration the resolution predates turns the mark off.
+        my str $name := '&' ~ $expr.name.canonicalize;
+        my $nearest := nqp::null();
+        my $outermost := nqp::null();
+        $resolver.find-scope-property(-> $scope {
+            $outermost := $scope;
+            $nearest := $scope
+                if nqp::isnull($nearest)
+                && nqp::isconcrete($scope.find-lexical($name));
+            Nil
+        });
+        $expr.IMPL-SET-CALLSTATIC()
+            if !nqp::isnull($nearest)
+            && nqp::eqaddr($nearest, $outermost)
+            && nqp::eqaddr($outermost.find-lexical($name), $decl);
         Nil
     }
 
