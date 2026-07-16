@@ -720,6 +720,7 @@ class RakuAST::Node {
             self.IMPL-MARK-STATIC-CALL($resolver, $expr);
             self.IMPL-MARK-STATIC-CHAIN($resolver, $expr);
             self.IMPL-MARK-RETURN-DECONT($resolver, $expr);
+            self.IMPL-MARK-ARRAY-INIT($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -932,6 +933,174 @@ class RakuAST::Node {
         $expr.IMPL-SET-ELIDE-RETURN-DECONT()
             if nqp::istype($expr, RakuAST::Routine);
         Nil
+    }
+
+    # Mark the initialization of a plain array from a comma list, both the
+    # declaration form and the assignment form, for lowering to a direct
+    # build of the list internals at code generation, skipping the STORE
+    # dispatch and the intermediate list the comma call builds.
+    method IMPL-MARK-ARRAY-INIT(RakuAST::Resolver $resolver, Mu $expr) {
+        if nqp::istype($expr, RakuAST::ApplyInfix) {
+            # The assignment form emits a runtime type guard with a STORE
+            # fallback, and both branches compile the operands, so an operand
+            # declaring a lexical must keep the plain STORE.
+            my $infix := $expr.infix;
+            $infix.IMPL-SET-LOWERED-ARRAY-INIT()
+                if nqp::istype($infix, RakuAST::Infix)
+                && $infix.operator eq '='
+                && nqp::istype($expr.left, RakuAST::Var::Lexical)
+                && $expr.left.is-resolved
+                && self.IMPL-PLAIN-ARRAY-DECL($expr.left.resolution)
+                && self.IMPL-CORE-COMMA-LIST($resolver, $expr.right)
+                && self.IMPL-DROPPABLE($expr.right);
+        }
+        elsif nqp::istype($expr, RakuAST::VarDeclaration::Simple) {
+            $expr.IMPL-SET-LOWERED-ARRAY-INIT()
+                if self.IMPL-PLAIN-ARRAY-DECL($expr)
+                && nqp::istype($expr.initializer, RakuAST::Initializer::Assign)
+                && self.IMPL-CORE-COMMA-LIST($resolver, $expr.initializer.expression);
+        }
+        Nil
+    }
+
+    # A plain lexical array declaration: no type, shape, where, twigil, or
+    # traits, so its container is the stock Array whose STORE the lowering
+    # replicates. A bind initializer disqualifies it, since the bound value
+    # replaces that container with anything, like a native array.
+    method IMPL-PLAIN-ARRAY-DECL(Mu $decl) {
+        nqp::istype($decl, RakuAST::VarDeclaration::Simple)
+          && $decl.sigil eq '@'
+          && $decl.twigil eq ''
+          && $decl.scope eq 'my'
+          && !nqp::isconcrete($decl.type)
+          && !nqp::isconcrete($decl.shape)
+          && !nqp::isconcrete($decl.where)
+          && !nqp::istype($decl.initializer, RakuAST::Initializer::Bind)
+          && nqp::elems(self.IMPL-UNWRAP-LIST($decl.traits)) == 0
+            ?? 1 !! 0
+    }
+
+    # An application of the core comma operator with plain operands.
+    method IMPL-CORE-COMMA-LIST(RakuAST::Resolver $resolver, Mu $expr) {
+        nqp::istype($expr, RakuAST::ApplyListInfix)
+          && nqp::istype($expr.infix, RakuAST::Infix)
+          && $expr.infix.operator eq ','
+          && nqp::elems(nqp::getattr($expr, RakuAST::ApplyListInfix, '$!adverbs')) == 0
+          && nqp::elems(self.IMPL-UNWRAP-LIST($expr.operands)) > 0
+          && self.IMPL-OPERATOR-IS-CORE($resolver, $expr.infix)
+            ?? 1 !! 0
+    }
+
+    # Whether a QAST subtree tolerates being compiled twice in one frame.
+    # The guarded array initialization places the same operand nodes in
+    # both branches, and compiling a declaration a second time collides
+    # ("Local ... already declared" for the locals a with modifier or an
+    # inlined metaop declares), while a block registers its frame per
+    # compilation. Such operands keep the plain STORE call.
+    method IMPL-QAST-SAFE-TO-RECOMPILE(Mu $qast) {
+        return 0 if nqp::istype($qast, QAST::Block);
+        return 0 if nqp::istype($qast, QAST::Var) && $qast.decl;
+        if nqp::istype($qast, QAST::Node) {
+            for @($qast) {
+                return 0 unless self.IMPL-QAST-SAFE-TO-RECOMPILE($_);
+            }
+        }
+        1
+    }
+
+    # The lowered initialization of a plain array from a comma list: bind a
+    # fresh reification buffer and a reifier whose future is the elements,
+    # then reify, the same layout the STORE method builds through dispatch.
+    # Null when the QAST is not the expected variable and core comma call
+    # shape, or when an operand cannot compile in both guard branches, and
+    # the caller then keeps the STORE call. A fallback, when given, guards
+    # the build behind a runtime check that the variable holds the stock
+    # Array: the declared container can be replaced by a bind, so the
+    # assignment form cannot rely on the declaration's shape.
+    method IMPL-ARRAY-INIT-QAST(Mu $var-qast, Mu $comma-qast, Mu $fallback?) {
+        return nqp::null() if $*COMPILING_CORE_SETTING;
+        return nqp::null() unless nqp::istype($var-qast, QAST::Var)
+            && nqp::istype($comma-qast, QAST::Op)
+            && ($comma-qast.op eq 'call' || $comma-qast.op eq 'callstatic')
+            && $comma-qast.name eq '&infix:<,>';
+        for @($comma-qast) {
+            return nqp::null() if $_.named;
+            return nqp::null()
+                if nqp::isconcrete($fallback)
+                && !self.IMPL-QAST-SAFE-TO-RECOMPILE($_);
+        }
+
+        my $Reifier := nqp::atkey(nqp::who(List), 'Reifier');
+        my $future := QAST::Op.new( :op<list> );
+        $future.set_children(@($comma-qast));
+        my $init := QAST::Stmts.new(
+            QAST::Op.new(
+                :op<callmethod>, :name('reify-until-lazy'),
+                QAST::Op.new(
+                    :op<getattr>,
+                    QAST::Op.new(
+                        :op<p6bindattrinvres>,
+                        QAST::Op.new(
+                            :op<p6bindattrinvres>,
+                            $var-qast,
+                            QAST::WVal.new(:value(List)),
+                            QAST::SVal.new(:value('$!reified')),
+                            QAST::Op.new(:op<create>,
+                                QAST::WVal.new(:value(IterationBuffer))),
+                        ),
+                        QAST::WVal.new(:value(List)),
+                        QAST::SVal.new(:value('$!todo')),
+                        QAST::Op.new(
+                            :op<p6bindattrinvres>,
+                            QAST::Op.new(
+                                :op<p6bindattrinvres>,
+                                QAST::Op.new(
+                                    :op<p6bindattrinvres>,
+                                    QAST::Op.new(:op<create>,
+                                        QAST::WVal.new(:value($Reifier))),
+                                    QAST::WVal.new(:value($Reifier)),
+                                    QAST::SVal.new(:value('$!reified')),
+                                    QAST::Op.new(
+                                        :op<getattr>,
+                                        $var-qast,
+                                        QAST::WVal.new(:value(List)),
+                                        QAST::SVal.new(:value('$!reified')),
+                                    )
+                                ),
+                                QAST::WVal.new(:value($Reifier)),
+                                QAST::SVal.new(:value('$!reification-target')),
+                                QAST::Op.new(
+                                    :op<callmethod>,
+                                    :name('reification-target'),
+                                    $var-qast,
+                                )
+                            ),
+                            QAST::WVal.new(:value($Reifier)),
+                            QAST::SVal.new(:value('$!future')),
+                            $future,
+                        ),
+                    ),
+                    QAST::WVal.new(:value(List)),
+                    QAST::SVal.new(:value('$!todo')),
+                ),
+            ),
+            $var-qast
+        );
+        $init.nosink(1);
+        if nqp::isconcrete($fallback) {
+            $init := QAST::Op.new(
+                :op<if>,
+                QAST::Op.new(
+                    :op<eqaddr>,
+                    QAST::Op.new( :op<what_nd>, $var-qast ),
+                    QAST::WVal.new(:value(Array)),
+                ),
+                $init,
+                $fallback,
+            );
+            $init.nosink(1);
+        }
+        $init
     }
 
     # Whether a resolution's lexical is bound once, so the VM may resolve a
