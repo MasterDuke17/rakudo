@@ -502,7 +502,8 @@ class RakuAST::LexicalScope
                 # We've been here before (tree with shared bits, presumably).
             }
             elsif nqp::existskey(BOOLIFY_FIRST_CHILD_OPS, $op) ||
-                    $op eq 'call' && nqp::existskey(BOOLIFY_FIRST_CHILD_CALLS, $qast.name) {
+                    ($op eq 'call' || $op eq 'callstatic')
+                    && nqp::existskey(BOOLIFY_FIRST_CHILD_CALLS, $qast.name) {
                 my int $first := 1;
                 for @($qast) {
                     if $first {
@@ -522,7 +523,9 @@ class RakuAST::LexicalScope
                  # Don't wrap a flattening arg (the synthetic FLATTENABLE_LIST/
                  # HASH calls): :flat must stay on the real result, not on a
                  # FATALIZE wrapper. The operand is still fatalized above.
-                 if !$bool-context && ($op eq 'call' || $op eq 'callmethod') && !$qast.flat {
+                 if !$bool-context
+                    && ($op eq 'call' || $op eq 'callstatic' || $op eq 'callmethod')
+                    && !$qast.flat {
                     if $qast.name eq '&fail' {
                         $qast.name('&die');
                     }

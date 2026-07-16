@@ -700,14 +700,17 @@ class RakuAST::Node {
 
         # Lowerings that direct code generation rather than replacing the
         # node register their marks here, gated on the optimize pass running.
-        # They each drop a layer of operator dispatch, so the `soft` pragma,
-        # which keeps routines wrappable, turns them off.
+        # They each drop a layer of operator dispatch or pin down a routine
+        # lookup, so the `soft` pragma, which keeps routines wrappable, turns
+        # them off.
         if $result =:= $expr && !self.IMPL-IN-SOFT-SCOPE($resolver) {
             self.IMPL-MARK-NATIVE-INCDEC($resolver, $expr);
             self.IMPL-MARK-NATIVE-METAOP($resolver, $expr);
             self.IMPL-MARK-SCALAR-METAOP($resolver, $expr);
             self.IMPL-MARK-DOT-ASSIGN($resolver, $expr);
             self.IMPL-MARK-RANGE-FOR($resolver, $expr);
+            self.IMPL-MARK-STATIC-CALL($resolver, $expr);
+            self.IMPL-MARK-STATIC-CHAIN($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -884,6 +887,73 @@ class RakuAST::Node {
             if nqp::isconcrete($operator)
             && self.IMPL-OPERATOR-IS-CORE($resolver, $operator);
         Nil
+    }
+
+    # Mark a call to a named sub whose callee lexical is bound once for a
+    # static callee lookup at code generation.
+    method IMPL-MARK-STATIC-CALL(RakuAST::Resolver $resolver, Mu $expr) {
+        return Nil unless nqp::istype($expr, RakuAST::Call::Name)
+            && $expr.name.is-identifier
+            && $expr.is-resolved;
+        $expr.IMPL-SET-CALLSTATIC()
+            if self.IMPL-RESOLUTION-BOUND-ONCE($resolver, $expr.resolution,
+                '&' ~ $expr.name.canonicalize);
+        Nil
+    }
+
+    # Mark a chaining comparison whose operator's lexical is bound once for a
+    # static callee lookup at code generation.
+    method IMPL-MARK-STATIC-CHAIN(RakuAST::Resolver $resolver, Mu $expr) {
+        return Nil unless nqp::istype($expr, RakuAST::ApplyInfix);
+        my $infix := $expr.infix;
+        return Nil unless nqp::istype($infix, RakuAST::Infix)
+            && $infix.is-resolved
+            && $infix.properties.chain;
+        $infix.IMPL-SET-CHAINSTATIC()
+            if self.IMPL-RESOLUTION-BOUND-ONCE($resolver, $infix.resolution,
+                '&infix' ~ $resolver.IMPL-CANONICALIZE-PAIR($infix.operator));
+        Nil
+    }
+
+    # Whether a resolution's lexical is bound once, so the VM may resolve a
+    # lookup of $name a single time and treat the result as a constant. Two
+    # kinds of binding qualify. A setting routine: the setting binds each
+    # routine name once and user code cannot rebind it. And a
+    # compile-time-valued binding in the outermost scope of the compilation
+    # unit (a sub declaration or an import), since that scope's frame is
+    # entered once per load and a sub declaration cannot be rebound. A
+    # declaration without a compile-time value, like `my &foo`, does not
+    # qualify: its binding is free to be rebound at runtime. Nor does a
+    # routine declared in a nested scope, since its enclosing frame is
+    # entered many times and each entry may bind a fresh clone. Nor does a
+    # callee compiled under the soft pragma, so it stays wrappable.
+    method IMPL-RESOLUTION-BOUND-ONCE(RakuAST::Resolver $resolver, Mu $decl, str $name) {
+        return 1 if nqp::istype($decl, RakuAST::Declaration::External::Setting);
+
+        return 0 unless nqp::istype($decl, RakuAST::CompileTimeValue)
+            || nqp::can($decl, 'maybe-compile-time-value');
+        my $routine := nqp::istype($decl, RakuAST::CompileTimeValue)
+            ?? $decl.compile-time-value
+            !! $decl.maybe-compile-time-value;
+        return 0 unless nqp::isconcrete($routine)
+            && nqp::istype($routine, Code)
+            && nqp::can($routine, 'soft') && !$routine.soft;
+
+        # The nearest scope declaring the name must be the outermost one, and
+        # the declaration found there must be the resolution itself, so a
+        # shadowing declaration the resolution predates turns the mark off.
+        my $nearest := nqp::null();
+        my $outermost := nqp::null();
+        $resolver.find-scope-property(-> $scope {
+            $outermost := $scope;
+            $nearest := $scope
+                if nqp::isnull($nearest)
+                && nqp::isconcrete($scope.find-lexical($name));
+            Nil
+        });
+        !nqp::isnull($nearest)
+            && nqp::eqaddr($nearest, $outermost)
+            && nqp::eqaddr($outermost.find-lexical($name), $decl)
     }
 
     # Inline a dot-assignment to an assignment of the method call's result,
