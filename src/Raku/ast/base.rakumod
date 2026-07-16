@@ -1193,16 +1193,44 @@ class RakuAST::Node {
     }
 
     # Whether an expression may serve as an operand for compile-time
-    # evaluation: a literal, an enumeration value such as True, or a quoted
-    # string whose value is known at compile time, which is how a plain string
-    # literal parses. Any of these holds no variable reference, so replacing
-    # it cannot orphan a lowered lexical.
+    # evaluation: a literal, an enumeration value such as True, a quoted
+    # string whose value is known at compile time, which is how a plain
+    # string literal parses, or a reference to a constant declaration. A
+    # stash reference (a name with a trailing ::) is left out: it claims
+    # the resolved package as its value where evaluating it produces that
+    # package's stash.
     method IMPL-FOLDABLE-OPERAND(Mu $operand) {
-        nqp::isconcrete($operand)
-          && (nqp::istype($operand, RakuAST::Literal)
-               || (nqp::istype($operand, RakuAST::QuotedString)
-                    || nqp::istype($operand, RakuAST::Term::Enum))
-                  && $operand.has-compile-time-value)
+        return 0 unless nqp::isconcrete($operand);
+        return 1 if nqp::istype($operand, RakuAST::Literal);
+        if nqp::istype($operand, RakuAST::QuotedString)
+            || nqp::istype($operand, RakuAST::Term::Enum) {
+            return $operand.has-compile-time-value ?? 1 !! 0;
+        }
+        if nqp::istype($operand, RakuAST::Term::Name) {
+            return $operand.is-resolved
+                && self.IMPL-CONSTANT-RESOLUTION($operand.resolution)
+                && !$operand.name.is-package-lookup ?? 1 !! 0;
+        }
+        if nqp::istype($operand, RakuAST::Var::Lexical) {
+            return $operand.is-resolved
+                && self.IMPL-CONSTANT-RESOLUTION($operand.resolution) ?? 1 !! 0;
+        }
+        0
+    }
+
+    # Whether a resolution is a genuinely constant declaration, whose
+    # compile-time value is the value evaluating a reference to it produces.
+    # The compile-time-value protocol alone cannot vouch for that: a plain
+    # variable declaration claims a value too, giving its container default.
+    # A containerized value is no constant either: an our-scoped variable
+    # imports as its Scalar container, whose value a later assignment can
+    # replace.
+    method IMPL-CONSTANT-RESOLUTION(Mu $decl) {
+        (nqp::istype($decl, RakuAST::VarDeclaration::Constant)
+          || nqp::istype($decl, RakuAST::VarDeclaration::Implicit::EnumValue)
+          || nqp::istype($decl, RakuAST::Declaration::External::Constant)
+          || nqp::istype($decl, RakuAST::Declaration::ResolvedConstant))
+          && !nqp::iscont($decl.compile-time-value)
             ?? 1 !! 0
     }
 
@@ -1228,9 +1256,8 @@ class RakuAST::Node {
     # Constant folding. Given a child expression, if it is a pure operator
     # applied to constant operands, evaluate it now and return a
     # RakuAST::Literal holding the result. Otherwise the expression is
-    # returned unchanged. Operands must satisfy IMPL-FOLDABLE-OPERAND (never
-    # variables, even constant ones) so folding never removes a variable
-    # reference, which keeps the later lexical-to-local lowering consistent.
+    # returned unchanged. Operands must satisfy IMPL-FOLDABLE-OPERAND, so a
+    # value only known at runtime never feeds an evaluation here.
     # The optimize walk is post-order, so a nested operator that has already
     # folded is itself a literal here, and nested constant arithmetic folds
     # up. Evaluation is guarded: a throw keeps the original runtime behaviour,
