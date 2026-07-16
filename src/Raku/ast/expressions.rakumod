@@ -484,6 +484,15 @@ class RakuAST::Infix
         }
     }
 
+    # Set by the optimize pass when the resolved operator's lexical is bound
+    # once, so a chaining operator's callee lookup can be compiled as a
+    # static one the VM resolves a single time.
+    has int $!chainstatic;
+
+    method IMPL-SET-CHAINSTATIC() {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!chainstatic', 1)
+    }
+
     method IMPL-INFIX-QAST(
       RakuAST::IMPL::QASTContext $context,
                               Mu $left-qast,
@@ -514,7 +523,9 @@ class RakuAST::Infix
           # Otherwise, it's called by finding the lexical sub to call, and
           # compiling it as chaining if required.
           !! self.IMPL-SIMPLIFY-REF-ARGS(QAST::Op.new(
-               :op(self.properties.chain ?? 'chain' !! 'call'),
+               :op(self.properties.chain
+                     ?? ($!chainstatic ?? 'chainstatic' !! 'chain')
+                     !! 'call'),
                :$name,
                $left-qast,
                $right-qast

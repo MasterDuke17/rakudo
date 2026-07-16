@@ -3,7 +3,7 @@ use Test::Helpers::QAST;
 use Test;
 use QAST:from<NQP>;
 use nqp;
-plan 18;
+plan 28;
 
 # A call to a named setting routine compiles its callee lookup as a static
 # one, which the VM may resolve a single time. So does a call to a routine
@@ -67,6 +67,25 @@ qast-is 'my &foo = sub { 1 }; foo()', -> \v {
     and not qast-op-named(v, 'callstatic', '&foo')
 }, 'a call through a routine variable keeps the plain callee lookup';
 
+# A single comparison is a static lookup under both frontends, though they
+# differ in shape: the legacy optimizer first rewrites the one-link chain
+# to a plain call.
+qast-is 'my $a = 1; my $b = 2; $a == $b', -> \v {
+    (qast-op-named(v, 'chainstatic', '&infix:<==>')
+        or qast-op-named(v, 'callstatic', '&infix:<==>'))
+    and not qast-op-named(v, 'chain', '&infix:<==>')
+    and not qast-op-named(v, 'call', '&infix:<==>')
+}, 'a comparison against a setting operator compiles to a static callee lookup';
+
+qast-is 'my $a = 1; my $b = 2; my $c = 3; $a == $b == $c', -> \v {
+        qast-op-named(v, 'chainstatic', '&infix:<==>')
+    and not qast-op-named(v, 'chain', '&infix:<==>')
+}, 'a chained comparison against a setting operator compiles to static chain links';
+
+qast-is '{ my multi sub infix:<==>(\a, \b) { return 3 }; my $x = "a"; my $y = "b"; $x == $y }', :full, -> \v {
+    not qast-op-named(v, 'chainstatic', '&infix:<==>')
+}, 'a comparison against a nested user operator keeps the plain lookup';
+
 # These observe that statically looked up callees still behave.
 {
     my $s = "HI";
@@ -82,7 +101,9 @@ qast-is 'my &foo = sub { 1 }; foo()', -> \v {
 }
 {
     sub g { fail "nope" }
-    ok g() ~~ Failure, 'fail produces a Failure through a static callee lookup';
+    my $f = g();
+    ok $f ~~ Failure, 'fail produces a Failure through a static callee lookup';
+    $f.so;
 }
 {
     my @a = 1, 2, 3;
@@ -105,5 +126,29 @@ is rt-fact(5), 120, 'a recursive outermost-scope sub computes through static loo
 is rt-mf(1), 1, 'a multi called with an Int picks the Int candidate';
 is rt-mf("x"), 2, 'a multi called with a Str picks the Str candidate';
 is rt-add(5), 15, 'an outermost-scope sub closing over a mainline lexical reads it';
+
+# Chained comparisons still follow the chaining protocol through static
+# operator lookups.
+my $lo = 1;
+my $mid = 2;
+my $hi = 3;
+ok $lo < $mid < $hi, 'a true chained comparison holds through static links';
+nok $lo < $hi < $mid, 'a false chained comparison fails through static links';
+my $rt-mid-calls = 0;
+sub rt-mid { $rt-mid-calls++; 2 }
+ok 1 < rt-mid() < 3, 'a chained comparison with a call in the middle holds';
+is $rt-mid-calls, 1, 'the middle operand of a chained comparison runs once';
+ok ?(any(1, 2) < 3), 'a Junction autothreads through a static comparison';
+
+# The fatalize pass recognizes a static callee lookup both as a call whose
+# Failure it promotes and as a boolifying consumer that disarms its argument.
+sub rt-will-fail() { fail 'nope' }
+{
+    sub rt-nested-fail() { fail 'nope' }
+    lives-ok { use fatal; my $x = defined rt-nested-fail(); 1 },
+        'use fatal respects defined through a static callee lookup';
+}
+dies-ok { use fatal; my $x = rt-will-fail(); 1 },
+    'use fatal promotes a Failure from a static callee lookup';
 
 # vim: expandtab shiftwidth=4
