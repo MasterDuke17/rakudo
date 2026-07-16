@@ -12,7 +12,7 @@ my class Format is Str is Callable {
         my $obj  := nqp::create(self);
 
         nqp::bindattr_s($obj,Str,'$!value',$format);
-        nqp::bindattr($obj,Format,'@!directives',@*DIRECTIVES);
+        nqp::bindattr($obj,Format,'@!directives',$class.directives($format));
         nqp::bindattr($obj,Format,'&!code',&code);
 
         $obj

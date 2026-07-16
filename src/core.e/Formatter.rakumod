@@ -1390,7 +1390,8 @@ our class Formatter {
     }
 
     # actual workhorse for sprintf()
-    my $FORMATS := nqp::hash;  # where we keep our formats
+    my $FORMATS    := nqp::hash;  # where we keep our formats
+    my $DIRECTIVES := nqp::hash;  # the directives seen for each format
     method new(Str:D $format) {
         nqp::ifnull(
           nqp::atkey($FORMATS,$format),
@@ -1398,18 +1399,34 @@ our class Formatter {
         )
     }
 
+    # The directives seen while producing the format's code, cached
+    # alongside the code so they are also available on a cache hit
+    method directives(Str:D $format) is implementation-detail {
+        self.new($format) unless nqp::existskey($DIRECTIVES,$format);
+        nqp::atkey($DIRECTIVES,$format)
+    }
+
     # Threadsafe cache updater, don't care about multiple threads trying
     # to do the same format, but this way we don't have a lock if the
     # same format is called *many* times over
     method !fetch-new-format(Str:D $format) {
-        my $new := nqp::clone($FORMATS);
+        my @*DIRECTIVES := my str @;  # the directives seen
+        my @*COERCIONS  := my str @;  # any coercions on parameters
+        my $new-formats    := nqp::clone($FORMATS);
+        my $new-directives := nqp::clone($DIRECTIVES);
 
         # remove the first key we encounter if max reached
-        nqp::deletekey($new,nqp::iterkey_s(nqp::shift(nqp::iterator($new))))
-          if nqp::isge_i(nqp::elems($new),100);  # XXX  should be settable
+        if nqp::isge_i(nqp::elems($new-formats),100) {  # XXX  should be settable
+            my str $evict =
+              nqp::iterkey_s(nqp::shift(nqp::iterator($new-formats)));
+            nqp::deletekey($new-formats,$evict);
+            nqp::deletekey($new-directives,$evict);
+        }
 
-        nqp::bindkey($new,$format,my $code := self.CODE($format));
-        $FORMATS := $new;
+        nqp::bindkey($new-formats,$format,my $code := self.CODE($format));
+        nqp::bindkey($new-directives,$format,@*DIRECTIVES);
+        $DIRECTIVES := $new-directives;
+        $FORMATS    := $new-formats;
         $code
     }
 }
