@@ -719,6 +719,7 @@ class RakuAST::Node {
             self.IMPL-MARK-RANGE-FOR($resolver, $expr);
             self.IMPL-MARK-STATIC-CALL($resolver, $expr);
             self.IMPL-MARK-STATIC-CHAIN($resolver, $expr);
+            self.IMPL-MARK-RETURN-DECONT($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -920,6 +921,16 @@ class RakuAST::Node {
         $infix.IMPL-SET-CHAINSTATIC()
             if self.IMPL-RESOLUTION-BOUND-ONCE($resolver, $infix.resolution,
                 '&infix' ~ $resolver.IMPL-CANONICALIZE-PAIR($infix.operator));
+        Nil
+    }
+
+    # Allow a routine to skip its return decontainerization when code
+    # generation can see the body's result is container-free. The shape
+    # check happens at code generation, where the body QAST exists; the mark
+    # only carries that the optimize pass ran.
+    method IMPL-MARK-RETURN-DECONT(RakuAST::Resolver $resolver, Mu $expr) {
+        $expr.IMPL-SET-ELIDE-RETURN-DECONT()
+            if nqp::istype($expr, RakuAST::Routine);
         Nil
     }
 

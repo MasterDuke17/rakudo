@@ -2258,6 +2258,66 @@ class RakuAST::Routine
         nqp::die('RakuAST::Routine subclass must implement IMPL-COMPILE-BODY')
     }
 
+    # Set by the optimize pass, allowing the return decontainerization to be
+    # skipped when the body's result is provably container-free.
+    has int $!elide-return-decont;
+
+    method IMPL-SET-ELIDE-RETURN-DECONT() {
+        nqp::bindattr_i(self, RakuAST::Routine, '$!elide-return-decont', 1)
+    }
+
+    # The op to decontainerize the fall-through return value with: the given
+    # full one, a plain native decont for a native assignment result, or none
+    # when the result is provably container-free: a boolification, a native
+    # or bigint operation, a native variable read (downgraded here from a
+    # reference to a plain read, which boxes a fresh value), the invocant, or
+    # an uncontainerized constant. Descends statement wrappers to the node
+    # whose value is the body's. An explicit return does not pass through
+    # this op either way, so only the fall-through value is at stake.
+    method IMPL-RETURN-DECONT-OP(Mu $body, str $full) {
+        my $node := $body;
+        while nqp::istype($node, QAST::Stmts) || nqp::istype($node, QAST::Stmt) {
+            my int $n := nqp::elems($node.list);
+            return $full unless $n;
+            my $rc := $node.resultchild;
+            $node := $node[nqp::defined($rc) ?? $rc !! $n - 1];
+        }
+        $node := $node[0]
+            if nqp::istype($node, QAST::Want) && nqp::elems($node.list);
+        if nqp::istype($node, QAST::Op) {
+            my str $op := $node.op;
+            return '' if $op eq 'hllbool' || nqp::eqat($op, 'I', -1);
+            if nqp::eqat($op, 'assign_', 0) {
+                return 'decont_i' if $op eq 'assign_i';
+                return 'decont_n' if $op eq 'assign_n';
+                return 'decont_s' if $op eq 'assign_s';
+                return 'decont_u' if $op eq 'assign_u';
+            }
+            return '' if nqp::eqat($op, '_i', -2) || nqp::eqat($op, '_u', -2)
+                || nqp::eqat($op, '_n', -2) || nqp::eqat($op, '_s', -2);
+        }
+        elsif nqp::istype($node, QAST::Var) {
+            my str $scope := $node.scope;
+            if $scope eq 'lexicalref' {
+                $node.scope('lexical');
+                return '';
+            }
+            if $scope eq 'attributeref' {
+                $node.scope('attribute');
+                return '';
+            }
+            return '' if $scope eq 'lexical' && $node.name eq 'self';
+        }
+        elsif nqp::istype($node, QAST::WVal) {
+            return '' unless nqp::iscont($node.value);
+        }
+        elsif nqp::istype($node, QAST::IVal) || nqp::istype($node, QAST::NVal)
+            || nqp::istype($node, QAST::SVal) {
+            return '';
+        }
+        $full
+    }
+
     method IMPL-WRAP-RETURN-HANDLER(RakuAST::IMPL::QASTContext $context, QAST::Node $body) {
         my $result := $body;
         my $routine := self.compile-time-value;
@@ -2268,8 +2328,18 @@ class RakuAST::Routine
         my str $decont-rv-op := $context.lang-version lt 'd' && $context.is-moar
             ?? 'p6decontrv_6c'
             !! 'p6decontrv';
-        $result := QAST::Op.new( :op($decont-rv-op), QAST::WVal.new( :value($routine) ), $result )
-            unless $routine.rw;
+        unless $routine.rw {
+            my str $decont-op := $!elide-return-decont
+                ?? self.IMPL-RETURN-DECONT-OP($body, $decont-rv-op)
+                !! $decont-rv-op;
+            if $decont-op eq $decont-rv-op {
+                $result := QAST::Op.new( :op($decont-rv-op),
+                    QAST::WVal.new( :value($routine) ), $result );
+            }
+            elsif $decont-op {
+                $result := QAST::Op.new( :op($decont-op), $result );
+            }
+        }
         if $!may-use-return {
             $result := QAST::Op.new(
                 :op<handlepayload>,
