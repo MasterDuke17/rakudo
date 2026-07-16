@@ -700,14 +700,16 @@ class RakuAST::Node {
 
         # Lowerings that direct code generation rather than replacing the
         # node register their marks here, gated on the optimize pass running.
-        # They each drop a layer of operator dispatch, so the `soft` pragma,
-        # which keeps routines wrappable, turns them off.
+        # They each drop a layer of operator dispatch or pin down a routine
+        # lookup, so the `soft` pragma, which keeps routines wrappable, turns
+        # them off.
         if $result =:= $expr && !self.IMPL-IN-SOFT-SCOPE($resolver) {
             self.IMPL-MARK-NATIVE-INCDEC($resolver, $expr);
             self.IMPL-MARK-NATIVE-METAOP($resolver, $expr);
             self.IMPL-MARK-SCALAR-METAOP($resolver, $expr);
             self.IMPL-MARK-DOT-ASSIGN($resolver, $expr);
             self.IMPL-MARK-RANGE-FOR($resolver, $expr);
+            self.IMPL-MARK-STATIC-CALL($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -883,6 +885,21 @@ class RakuAST::Node {
         $for.IMPL-SET-CAN-LOWER-RANGE()
             if nqp::isconcrete($operator)
             && self.IMPL-OPERATOR-IS-CORE($resolver, $operator);
+        Nil
+    }
+
+    # Mark a call to a named sub that resolved to a setting routine for a
+    # static callee lookup at code generation. The setting binds each routine
+    # name once and user code cannot rebind it, so the VM may resolve the
+    # lookup a single time and treat the result as a constant. A name declared
+    # in user code stays a plain lookup even when it resolves at compile time,
+    # since its binding may be a fresh clone per scope entry.
+    method IMPL-MARK-STATIC-CALL(RakuAST::Resolver $resolver, Mu $expr) {
+        $expr.IMPL-SET-CALLSTATIC()
+            if nqp::istype($expr, RakuAST::Call::Name)
+            && $expr.name.is-identifier
+            && $expr.is-resolved
+            && nqp::istype($expr.resolution, RakuAST::Declaration::External::Setting);
         Nil
     }
 

@@ -468,6 +468,15 @@ class RakuAST::Call::Name
         @sigs
     }
 
+    # Set by the optimize pass when the resolved callee is a setting routine,
+    # whose lexical is bound once, so the callee lookup can be compiled as a
+    # static one the VM resolves a single time.
+    has int $!callstatic;
+
+    method IMPL-SET-CALLSTATIC() {
+        nqp::bindattr_i(self, RakuAST::Call::Name, '$!callstatic', 1)
+    }
+
     method IMPL-EXPR-QAST(RakuAST::IMPL::QASTContext $context) {
         my $call := QAST::Op.new( :op('call') );
         if $!name.is-identifier {
@@ -483,6 +492,7 @@ class RakuAST::Call::Name
                     $name := '&' ~ $!name.canonicalize;
                 }
                 $call.name($name);
+                $call.op('callstatic') if $!callstatic;
             }
         }
         else {

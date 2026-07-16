@@ -858,7 +858,7 @@ class RakuAST::Feed
             # for @(*) since if we find that it overrides all other things.
             # But that's todo...soon. :-)
             if nqp::istype($stage, QAST::Op) {
-                if $stage.op eq 'call' {
+                if $stage.op eq 'call' || $stage.op eq 'callstatic' {
                     # It's a call. Stick a call to the current supplier in
                     # as its last argument.
                     $stage.push(QAST::Op.new( :op('call'), $result ));
