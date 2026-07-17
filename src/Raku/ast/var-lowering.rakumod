@@ -238,6 +238,27 @@ class RakuAST::IMPL::VarLowering {
             return Nil;
         }
 
+        # A bare block statement is called where it stands, so it
+        # flattens under the same rules as a loop body. A loop modifier
+        # keeps the block a per-iteration frame, and a topicalizing
+        # condition modifier passes the block an argument.
+        if nqp::istype($node, RakuAST::Statement::Expression)
+            && !nqp::isconcrete($node.loop-modifier) {
+            my $expression := $node.expression;
+            my $cond := $node.condition-modifier;
+            if nqp::eqaddr($expression.WHAT, RakuAST::Block)
+                && $expression.bare-block
+                && (!nqp::isconcrete($cond)
+                    || nqp::istype($cond, RakuAST::StatementModifier::If)
+                    || nqp::istype($cond, RakuAST::StatementModifier::Unless)) {
+                self.IMPL-REGISTER-IMPLICIT-LOOKUPS($node);
+                self.IMPL-WALK($cond) if nqp::isconcrete($cond);
+                self.IMPL-WALK-FLATTEN-CANDIDATE($expression);
+                $node.visit-labels(-> $label { self.IMPL-WALK($label) });
+                return Nil;
+            }
+        }
+
         # A variable declaration belongs to the enclosing scope's frame,
         # not to any frame the node itself creates. A parameter's uses
         # resolve to the target node while emission delegates to the

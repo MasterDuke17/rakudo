@@ -1756,6 +1756,11 @@ class RakuAST::Block
             $block
         }
         else {
+            # A frame-independent bare block statement runs inline, with
+            # no closure clone and no call.
+            return self.IMPL-QAST-FLATTENED($context)
+                if self.bare-block && self.IMPL-FLATTEN-APPROVED;
+
             # Not immediate, so already produced as a declaration above; just
             # closure clone it. Only invoke if it's a bare block.
             # Ensure the block is linked when our outer block gets cloned before

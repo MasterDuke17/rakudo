@@ -3,7 +3,7 @@ use Test::Helpers::QAST;
 use Test;
 use QAST:from<NQP>;
 use nqp;
-plan 18;
+plan 21;
 
 # The sunk body of a loop statement whose every piece is provably
 # frame-independent is emitted inline rather than called as a block each
@@ -109,6 +109,31 @@ else {
         die 'boom' if $i == 2;
     }
     is $caught, 'c', 'a CATCH in the loop body keeps the body a frame and fires';
+}
+
+# A bare block statement flattens under the same rules. The legacy
+# optimizer cannot flatten these, since their optional topic parameter
+# defeats its arity check, so the shape is only asserted here.
+
+if nqp::ifnull(nqp::gethllsym('Raku', 'COMPILER-FRONTEND'), '') eq 'rakuast' {
+    qast-is 'my $x = 0; { $x = 5 }; say $x', :full, -> \v {
+        qast-var-decl(v, '$x', 'static')
+    }, 'a lexical used only from a flattenable bare block statement is lowered';
+}
+else {
+    skip 'bare block flattening is specific to the RakuAST frontend';
+}
+
+{
+    my $x = 0;
+    { my $t = 3; $x = $t }
+    is $x, 3, 'a flattened bare block statement runs its statements';
+}
+
+{
+    $_ = 42;
+    { $_ := 43 }
+    is $_, 42, 'a bare block that rebinds the topic keeps its frame and alias';
 }
 
 # Conditional statement branch bodies flatten the same way.
