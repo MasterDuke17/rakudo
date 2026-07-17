@@ -1630,7 +1630,9 @@ class RakuAST::Statement::Loop
             my $loop-qast := QAST::Op.new(
                 :$op,
                 $!condition ?? $!condition.IMPL-TO-QAST($context) !! QAST::IVal.new( :value(1) ),
-                $!body.IMPL-TO-QAST($context, :immediate),
+                $!body.IMPL-FLATTEN-APPROVED
+                    ?? $!body.IMPL-QAST-FLATTENED($context)
+                    !! $!body.IMPL-TO-QAST($context, :immediate),
             );
             my @post;
             if @next-phasers {

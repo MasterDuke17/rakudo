@@ -1456,6 +1456,40 @@ class RakuAST::Block
     has int $!is-in-method;
     has int $!may-have-signature;
 
+    # Set by the lexical-to-local lowering analysis on the sunk body of a
+    # loop statement when everything the block does is provably
+    # frame-independent: every declaration it makes is a lowered local or
+    # an unused implicit, nothing reaches its lexicals by name, and it
+    # has no phasers or handlers. The loop then emits the body's
+    # statements inline instead of calling the block each iteration.
+    has int $!flatten-approved;
+
+    method IMPL-SET-FLATTEN-APPROVED() {
+        nqp::bindattr_i(self, RakuAST::Block, '$!flatten-approved', 1)
+    }
+
+    method IMPL-FLATTEN-APPROVED() { $!flatten-approved }
+
+    # The body emitted for inlining into the frame of the block's user:
+    # declarations of nested code objects, the lowered locals with a
+    # fresh container clone on every entry (a per-iteration frame would
+    # have provided a fresh container the same way), and the statement
+    # list. The by-name sentinel lexicals are deliberately absent, since
+    # the enclosing frame's symbols are not this block's to declare.
+    method IMPL-QAST-FLATTENED(RakuAST::IMPL::QASTContext $context) {
+        my $stmts := QAST::Stmts.new();
+        for self.IMPL-UNWRAP-LIST(self.ast-lexical-declarations()) {
+            if nqp::istype($_, RakuAST::VarDeclaration::Simple)
+                && $_.IMPL-LOWERED-LOCAL-NAME {
+                $stmts.push($_.IMPL-QAST-DECL-FLATTENED($context));
+            }
+        }
+        my $nested-blocks := self.IMPL-QAST-NESTED-BLOCK-DECLS($context);
+        $stmts.push($nested-blocks) if nqp::elems($nested-blocks.list);
+        $stmts.push($!body.IMPL-TO-QAST($context));
+        $stmts
+    }
+
     method new(RakuAST::Blockoid :$body,
                             Bool :$implicit-topic,
                             Bool :$required-topic,

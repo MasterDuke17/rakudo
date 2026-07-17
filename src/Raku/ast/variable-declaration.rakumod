@@ -769,6 +769,36 @@ class RakuAST::VarDeclaration::Simple
         $!lowered-local-name
     }
 
+    # The declaration form for a scope flattened into its user's frame:
+    # the local, refreshed with a clone of the container prototype on
+    # every entry, so each iteration of a flattened loop body gets its
+    # own container the way a per-iteration frame would have. A bound
+    # declaration has no container and needs no refresh.
+    method IMPL-QAST-DECL-FLATTENED(RakuAST::IMPL::QASTContext $context) {
+        my str $local-name := self.IMPL-LOWERED-LOCAL-NAME;
+        nqp::die('Cannot emit a flattened declaration that is not lowered')
+            unless $local-name;
+        my $decl := QAST::Var.new( :scope('local'), :decl('var'), :name($local-name) );
+        if $!initializer && $!initializer.is-binding {
+            $decl
+        }
+        else {
+            my $container := self.meta-object;
+            $context.ensure-sc($container);
+            QAST::Stmts.new(
+                $decl,
+                QAST::Op.new(
+                    :op('bind'),
+                    QAST::Var.new( :name($local-name), :scope('local') ),
+                    # clone_nd, since a plain clone would decontainerize
+                    # and clone the prototype's default value instead of
+                    # the container.
+                    QAST::Op.new( :op('clone_nd'), QAST::WVal.new( :value($container) ) )
+                )
+            )
+        }
+    }
+
     method new(          str :$scope,
                RakuAST::Name :$desigilname!,
                          str :$sigil,
