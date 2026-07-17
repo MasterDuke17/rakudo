@@ -218,13 +218,13 @@ class RakuAST::CompUnit
     # QAST generation. It pushes the unit scope itself in batch resolve mode
     # (the tree is already checked, nothing is being declared), so a caller just
     # hands over a resolver.
-    method optimize(RakuAST::Resolver $resolver) {
+    method optimize(RakuAST::Resolver $resolver, :$interactive?) {
         $resolver.push-scope(self);
         $!mainline.IMPL-OPTIMIZE($resolver);
         self.IMPL-OPTIMIZE($resolver);
         # With the tree in its final shape, decide which lexicals can be
         # emitted as frame-locals.
-        RakuAST::IMPL::VarLowering.analyze-compunit(self);
+        RakuAST::IMPL::VarLowering.analyze-compunit(self, $resolver, :$interactive);
         $resolver.pop-scope;
     }
 
