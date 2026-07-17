@@ -192,6 +192,32 @@ class RakuAST::IMPL::VarLowering {
             }
         }
 
+        # A conditional statement's branch bodies flatten the same way,
+        # sunk or value-producing: an inlined branch evaluates to its
+        # last statement just as the immediate block call did. A branch
+        # that topicalizes, as with and orwith do, keeps its frame,
+        # which its required topic enforces in the verdict.
+        if nqp::istype($node, RakuAST::Statement::IfWith) {
+            self.IMPL-REGISTER-IMPLICIT-LOOKUPS($node);
+            self.IMPL-WALK($node.condition);
+            self.IMPL-WALK-FLATTEN-CANDIDATE($node.then);
+            for $node.IMPL-UNWRAP-LIST($node.elsifs) {
+                self.IMPL-WALK($_.condition);
+                self.IMPL-WALK-FLATTEN-CANDIDATE($_.then);
+            }
+            my $else := $node.else;
+            self.IMPL-WALK-FLATTEN-CANDIDATE($else) if nqp::isconcrete($else);
+            $node.visit-labels(-> $label { self.IMPL-WALK($label) });
+            return Nil;
+        }
+        if nqp::istype($node, RakuAST::Statement::Unless) {
+            self.IMPL-REGISTER-IMPLICIT-LOOKUPS($node);
+            self.IMPL-WALK($node.condition);
+            self.IMPL-WALK-FLATTEN-CANDIDATE($node.body);
+            $node.visit-labels(-> $label { self.IMPL-WALK($label) });
+            return Nil;
+        }
+
         # A variable declaration belongs to the enclosing scope's frame,
         # not to any frame the node itself creates. A parameter's uses
         # resolve to the target node while emission delegates to the
@@ -518,6 +544,26 @@ class RakuAST::IMPL::VarLowering {
                 my str $op := $prefix.operator;
                 $top.block-flatten() if $op eq 'temp' || $op eq 'let';
             }
+        }
+        elsif nqp::istype($node, RakuAST::Nqp) {
+            # Ops that observe the identity of the running frame, or of
+            # its caller or outer, mean something else once the frame is
+            # gone.
+            my constant FRAME-OPS := nqp::hash(
+                'ctx', 1, 'ctxcaller', 1, 'ctxcallerskipthunks', 1,
+                'ctxouter', 1, 'ctxouterskipthunks', 1,
+                'curcode', 1, 'callercode', 1,
+                'getlexouter', 1, 'getlexcaller', 1, 'getlexdyn', 1,
+                'getlexrel', 1, 'getlexreldyn', 1, 'getlexrelcaller', 1,
+                'savecapture', 1, 'usecapture', 1, 'takedispatcher', 1,
+            );
+            $top.block-flatten() if nqp::existskey(FRAME-OPS, $node.op);
+        }
+        elsif nqp::istype($node, RakuAST::Var::Dynamic) {
+            # A dynamic lookup that did not resolve lexically walks the
+            # caller chain at run time, and that walk starts at the
+            # frame's caller, so removing the frame skips one link.
+            $top.block-flatten();
         }
         elsif nqp::istype($node, RakuAST::Var::Lexical) {
             # A magical is emitted as a by-name lexical, so at run time

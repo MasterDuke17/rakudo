@@ -3,7 +3,7 @@ use Test::Helpers::QAST;
 use Test;
 use QAST:from<NQP>;
 use nqp;
-plan 12;
+plan 18;
 
 # The sunk body of a loop statement whose every piece is provably
 # frame-independent is emitted inline rather than called as a block each
@@ -109,4 +109,44 @@ else {
         die 'boom' if $i == 2;
     }
     is $caught, 'c', 'a CATCH in the loop body keeps the body a frame and fires';
+}
+
+# Conditional statement branch bodies flatten the same way.
+
+qast-is 'my $sum = 0; my int $i = 0; while $i < 9 { if $i % 2 { $sum = $sum + $i } else { $sum = $sum - 1 }; $i = $i + 1 }; say $sum',
+    :full, -> \v {
+    qast-var-decl(v, '$sum', 'static')
+}, 'an accumulator used from branch bodies inside a loop body is lowered';
+
+{
+    my $sum = 0;
+    my int $i = 0;
+    while $i < 9 { if $i % 2 { $sum = $sum + $i } else { $sum = $sum - 1 }; $i = $i + 1 }
+    is $sum, 11, 'flattened branch bodies inside a flattened loop accumulate correctly';
+}
+
+{
+    my $x = 5;
+    my $r = do if $x > 3 { 'big' } else { 'small' };
+    is $r, 'big', 'a value-producing if with flattened branches evaluates to the branch value';
+}
+
+{
+    my $r = '';
+    for 1..3 -> $n { if $n == 1 { $r ~= 'a' } elsif $n == 2 { $r ~= 'b' } else { $r ~= 'c' } }
+    is $r, 'abc', 'an elsif chain with flattened branches selects correctly';
+}
+
+{
+    my $c = 0;
+    my int $i = 0;
+    while $i < 4 { unless $i == 2 { $c = $c + 1 }; $i = $i + 1 }
+    is $c, 3, 'a flattened unless body runs when its condition is false';
+}
+
+{
+    sub with-dynamic() { my $*D = 5; read-dynamic() }
+    sub read-dynamic() { my $r; if 1 { $r = $*D }; $r }
+    is with-dynamic(), 5,
+        'a dynamic lookup in a branch body still walks the caller chain';
 }
