@@ -222,6 +222,9 @@ class RakuAST::CompUnit
         $resolver.push-scope(self);
         $!mainline.IMPL-OPTIMIZE($resolver);
         self.IMPL-OPTIMIZE($resolver);
+        # With the tree in its final shape, decide which lexicals can be
+        # emitted as frame-locals.
+        RakuAST::IMPL::VarLowering.analyze-compunit(self);
         $resolver.pop-scope;
     }
 

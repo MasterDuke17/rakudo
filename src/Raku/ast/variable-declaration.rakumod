@@ -709,9 +709,20 @@ class RakuAST::VarDeclaration::Simple
     # a comma list, for lowering to a direct build of the list internals.
     has int $!lowered-array-init;
 
+    # Set by the lexical-to-local lowering analysis when every access to
+    # this declaration is confined to the declaring frame, so it can be
+    # emitted as a frame-local rather than a by-name lexical.
+    has int $!lowered-to-local;
+
     method IMPL-SET-LOWERED-ARRAY-INIT() {
         nqp::bindattr_i(self, RakuAST::VarDeclaration::Simple, '$!lowered-array-init', 1)
     }
+
+    method IMPL-SET-LOWERED-TO-LOCAL() {
+        nqp::bindattr_i(self, RakuAST::VarDeclaration::Simple, '$!lowered-to-local', 1)
+    }
+
+    method IMPL-LOWERED-TO-LOCAL() { $!lowered-to-local }
 
     method new(          str :$scope,
                RakuAST::Name :$desigilname!,
