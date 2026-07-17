@@ -1470,6 +1470,45 @@ class RakuAST::Block
 
     method IMPL-FLATTEN-APPROVED() { $!flatten-approved }
 
+    # The declaration receiving a flattened invocation's argument. A
+    # plain block has none: its topic is only eligible for flattening
+    # when unused, so the argument is discarded.
+    method IMPL-FLATTEN-ARG-DECLARATION() { nqp::null }
+
+    # As IMPL-QAST-FLATTENED, but binding the given argument QAST into
+    # the block's argument declaration, the way calling the block with
+    # one positional would have.
+    method IMPL-QAST-FLATTENED-WITH-ARG(RakuAST::IMPL::QASTContext $context, Mu $arg-qast) {
+        my $arg-decl := self.IMPL-FLATTEN-ARG-DECLARATION;
+        my $stmts := QAST::Stmts.new();
+        for self.IMPL-UNWRAP-LIST(self.ast-lexical-declarations()) {
+            if nqp::istype($_, RakuAST::VarDeclaration::Simple)
+                && $_.IMPL-LOWERED-LOCAL-NAME {
+                if !nqp::isnull($arg-decl) && nqp::eqaddr($_, $arg-decl) {
+                    my str $local-name := $_.IMPL-LOWERED-LOCAL-NAME;
+                    $stmts.push(QAST::Var.new(
+                        :scope('local'), :decl('var'), :name($local-name) ));
+                    # hllize as the parameter binder would have, since
+                    # an iterator driven from nqp-side code can hand out
+                    # unboxed values.
+                    $stmts.push(QAST::Op.new(
+                        :op('bind'),
+                        QAST::Var.new( :name($local-name), :scope('local') ),
+                        QAST::Op.new( :op('hllize'),
+                            QAST::Op.new( :op('decont'), $arg-qast ) )
+                    ));
+                }
+                else {
+                    $stmts.push($_.IMPL-QAST-DECL-FLATTENED($context));
+                }
+            }
+        }
+        my $nested-blocks := self.IMPL-QAST-NESTED-BLOCK-DECLS($context);
+        $stmts.push($nested-blocks) if nqp::elems($nested-blocks.list);
+        $stmts.push($!body.IMPL-TO-QAST($context));
+        $stmts
+    }
+
     # The body emitted for inlining into the frame of the block's user:
     # declarations of nested code objects, the lowered locals with a
     # fresh container clone on every entry (a per-iteration frame would
@@ -1713,6 +1752,7 @@ class RakuAST::Block
             :$blocktype,
             self.IMPL-QAST-DECLS($context)
         );
+        self.IMPL-ADD-LOWERED-DEBUG-MAPPINGS($block);
 
         # Compile body and, if needed, a signature, and set up arity and any
         # exception rethrow logic.
@@ -1802,6 +1842,33 @@ class RakuAST::PointyBlock
   is RakuAST::Doc::DeclaratorTarget
 {
     has RakuAST::Signature $.signature;
+
+    # The single plain positional parameter, when the signature is
+    # simple enough that binding a flattened invocation's argument to
+    # the parameter's local matches what the call would have done: no
+    # type to check, no default, no where, no adverbs, no traits.
+    method IMPL-FLATTEN-ARG-DECLARATION() {
+        my @params := self.IMPL-UNWRAP-LIST($!signature.parameters);
+        return nqp::null unless nqp::elems(@params) == 1;
+        my $param := @params[0];
+        return nqp::null if nqp::isconcrete($param.type)
+            || nqp::isconcrete($param.default)
+            || nqp::isconcrete($param.where)
+            || nqp::isconcrete($param.array-shape)
+            || nqp::isconcrete($param.sub-signature)
+            || $param.optional
+            || $param.invocant
+            || $param.default-rw
+            || $param.default-raw
+            || !($param.slurpy =:= RakuAST::Parameter::Slurpy)
+            || nqp::elems($param.IMPL-UNWRAP-LIST($param.names))
+            || nqp::elems($param.IMPL-UNWRAP-LIST($param.traits));
+        my $target := $param.target;
+        return nqp::null unless nqp::istype($target, RakuAST::ParameterTarget::Var)
+            && nqp::isconcrete($target.declaration)
+            && !nqp::elems($target.declaration.IMPL-UNWRAP-LIST($target.declaration.traits));
+        $target.declaration
+    }
 
     method new(RakuAST::Signature :$signature,
                 RakuAST::Blockoid :$body,
@@ -2283,6 +2350,7 @@ class RakuAST::Routine
                     :blocktype('declaration_static'),
                     self.IMPL-QAST-DECLS($context)
                 ), :key);
+        self.IMPL-ADD-LOWERED-DEBUG-MAPPINGS($block);
         my $signature := self.placeholder-signature || $!signature;
         $block.push($signature.IMPL-QAST-BINDINGS($context, :needs-full-binder(self.custom-args), :multi(self.multiness eq 'multi')));
         $block.custom_args(1) if self.custom-args;

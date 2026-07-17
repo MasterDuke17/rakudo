@@ -591,6 +591,9 @@ class RakuAST::CompUnit
                 $!mainline.IMPL-QAST-FORM-BLOCK($context, :blocktype<declaration_static>);
         $top-level.name('<unit>');
         $top-level.annotate('IN_DECL', $!is-eval ?? 'eval' !! 'mainline');
+        # The compilation unit's own lowered declarations live in the
+        # mainline frame the shell block forms.
+        self.IMPL-ADD-LOWERED-DEBUG-MAPPINGS($top-level);
         my @pre-deserialize;
         # When compiling a CORE.<spec>.setting (setting-name shaped like
         # 'NULL.<spec>'), emit a pre-deserialize task that calls

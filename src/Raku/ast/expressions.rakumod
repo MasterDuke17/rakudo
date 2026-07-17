@@ -3981,7 +3981,9 @@ class RakuAST::Statement::For
             && self.IMPL-CAN-USE-STATEMENT-FORM($!body) {
             my @lookups := self.IMPL-UNWRAP-LIST(self.get-implicit-lookups);
             my $Nil := @lookups[1].resolution.compile-time-value;
-            my $body-qast := $!body.IMPL-TO-QAST($context);
+            my int $flatten := $!body.IMPL-FLATTEN-APPROVED;
+            my $flatten-body := $flatten ?? $!body !! Mu;
+            my $body-qast := $flatten ?? Mu !! $!body.IMPL-TO-QAST($context);
 
             # An integer-range source the optimize pass approved becomes a
             # native counting loop, unless a bound turns out not to be a
@@ -3990,7 +3992,7 @@ class RakuAST::Statement::For
                 && nqp::elems(@labels) == 0
                 && !$!body.has-any-phasers {
                 my $range-qast := self.IMPL-TO-QAST-RANGE(
-                    $context, $!source, $body-qast, $Nil);
+                    $context, $!source, $body-qast, $Nil, :flatten-body($flatten-body));
                 return $range-qast unless $range-qast =:= Mu;
             }
 
@@ -4000,7 +4002,8 @@ class RakuAST::Statement::For
               $body-qast,
               @labels ?? @labels[0] !! RakuAST::Label,
               @lookups[0].resolution.compile-time-value,
-              $Nil
+              $Nil,
+              :flatten-body($flatten-body)
             );
         }
 

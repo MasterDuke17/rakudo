@@ -18,6 +18,7 @@ class RakuAST::IMPL::VarLoweringFrame {
     has Mu $!implicit-names;
     has int $!implicit-used;
     has int $!flatten-candidate;
+    has int $!flatten-arg;
     has int $!flatten-blocked;
     has Mu $!deferred-uses;
     has str $!implicit-slurpy-id;
@@ -63,6 +64,11 @@ class RakuAST::IMPL::VarLoweringFrame {
         nqp::bindattr_i(self, RakuAST::IMPL::VarLoweringFrame, '$!flatten-candidate', 1);
         Nil
     }
+    method mark-flatten-arg() {
+        nqp::bindattr_i(self, RakuAST::IMPL::VarLoweringFrame, '$!flatten-arg', 1);
+        Nil
+    }
+    method flatten-arg() { $!flatten-arg }
     method is-flatten-candidate() { $!flatten-candidate }
     method block-flatten() {
         nqp::bindattr_i(self, RakuAST::IMPL::VarLoweringFrame, '$!flatten-blocked', 1);
@@ -234,6 +240,31 @@ class RakuAST::IMPL::VarLowering {
             self.IMPL-REGISTER-IMPLICIT-LOOKUPS($node);
             self.IMPL-WALK($node.condition);
             self.IMPL-WALK-FLATTEN-CANDIDATE($node.body);
+            $node.visit-labels(-> $label { self.IMPL-WALK($label) });
+            return Nil;
+        }
+
+        # A sunk serial for statement drives its body directly, and a
+        # given calls its body with the topicalized value, so both walk
+        # their bodies as argument-taking flatten candidates: a plain
+        # body flattens when its topic goes unused, and a pointy body
+        # with one plain parameter has the iteration value bound to the
+        # parameter's local instead.
+        if nqp::istype($node, RakuAST::Statement::For)
+            && $node.mode eq 'serial'
+            && $node.IMPL-DISCARD-RESULT
+            && !nqp::isconcrete($node.otherwise)
+            && $node.IMPL-CAN-USE-STATEMENT-FORM($node.body) {
+            self.IMPL-REGISTER-IMPLICIT-LOOKUPS($node);
+            self.IMPL-WALK($node.source);
+            self.IMPL-WALK-FLATTEN-CANDIDATE($node.body, :arg);
+            $node.visit-labels(-> $label { self.IMPL-WALK($label) });
+            return Nil;
+        }
+        if nqp::istype($node, RakuAST::Statement::Given) {
+            self.IMPL-REGISTER-IMPLICIT-LOOKUPS($node);
+            self.IMPL-WALK($node.source);
+            self.IMPL-WALK-FLATTEN-CANDIDATE($node.body, :arg);
             $node.visit-labels(-> $label { self.IMPL-WALK($label) });
             return Nil;
         }
@@ -510,9 +541,14 @@ class RakuAST::IMPL::VarLowering {
                 && $_.IMPL-LOWERED-LOCAL-NAME {
             }
             else {
+                # Before 6.d the topic is dynamic, so a called routine can
+                # reach it by name with no use this analysis could see,
+                # and a body declaring one must stay a frame.
                 return 0 if nqp::isnull($frame.implicit-record-for-id(~nqp::objectid($_)))
                     || !nqp::istype($_, RakuAST::VarDeclaration::Implicit::BlockTopic)
-                    || $_.required || $_.exception;
+                    || ($_.required && !$frame.flatten-arg)
+                    || !$!topic-not-dynamic
+                    || $_.exception;
             }
         }
         1
@@ -612,8 +648,12 @@ class RakuAST::IMPL::VarLowering {
     # its shape allows flattening at all: a plain block, no signature or
     # placeholders, no phasers. Everything else about eligibility is
     # decided from what the walk observes, when the frame pops.
-    method IMPL-WALK-FLATTEN-CANDIDATE(RakuAST::Node $body) {
-        unless nqp::eqaddr($body.WHAT, RakuAST::Block)
+    method IMPL-WALK-FLATTEN-CANDIDATE(RakuAST::Node $body, :$arg?) {
+        my int $shape-ok := nqp::eqaddr($body.WHAT, RakuAST::Block);
+        $shape-ok := 1 if $arg
+            && nqp::eqaddr($body.WHAT, RakuAST::PointyBlock)
+            && !nqp::isnull($body.IMPL-FLATTEN-ARG-DECLARATION);
+        unless $shape-ok
             && !nqp::isconcrete($body.placeholder-signature)
             && !$body.has-any-phasers {
             self.IMPL-WALK($body);
@@ -621,6 +661,7 @@ class RakuAST::IMPL::VarLowering {
         }
         my $frame := self.IMPL-ENTER($body, 1);
         $frame.mark-flatten-candidate();
+        $frame.mark-flatten-arg() if $arg;
         self.IMPL-REGISTER-IMPLICIT-LOOKUPS($body);
         $body.visit-children(-> $child { self.IMPL-WALK($child) });
         self.IMPL-LEAVE();

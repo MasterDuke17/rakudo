@@ -252,7 +252,7 @@ class RakuAST::ForLoopImplementation
     # via the optimize pass and that the body is a simple one-argument
     # block with no phasers.
     method IMPL-TO-QAST-RANGE(RakuAST::IMPL::QASTContext $context,
-            Mu $source, Mu $body-qast, Mu $Nil) {
+            Mu $source, Mu $body-qast, Mu $Nil, :$flatten-body) {
         my $expr := self.IMPL-UNWRAP-RANGE-EXPRESSION($source);
         my int $reverse := 0;
         if nqp::istype($expr, RakuAST::ApplyPostfix)
@@ -321,13 +321,25 @@ class RakuAST::ForLoopImplementation
                 :name($last-name), :scope<local>, :decl<var>, :returns(int) ),
             $end-qast
         );
-        my $bind-callee := QAST::Op.new( :op<bind>,
-            QAST::Var.new( :name($callee-name), :scope<local>, :decl<var> ),
-            $body-qast
-        );
+        my int $flatten := nqp::isconcrete($flatten-body);
+        my $bind-callee;
+        unless $flatten {
+            $bind-callee := QAST::Op.new( :op<bind>,
+                QAST::Var.new( :name($callee-name), :scope<local>, :decl<var> ),
+                $body-qast
+            );
+        }
 
-        # Step the iteration value and call the body with it while it is
-        # on the start side of the end value.
+        # Step the iteration value and run the body with it while it is
+        # on the start side of the end value: inline when the body
+        # flattens, as a call otherwise.
+        my $body-run := $flatten
+            ?? $flatten-body.IMPL-QAST-FLATTENED-WITH-ARG($context,
+                QAST::Var.new( :name($it-name), :scope<local>, :returns(int) ))
+            !! QAST::Op.new( :op<call>,
+                QAST::Var.new( :name($callee-name), :scope<local> ),
+                QAST::Var.new( :name($it-name), :scope<local>, :returns(int) )
+            );
         my $loop := QAST::Op.new( :op<while>,
             QAST::Op.new(
                 :op($step < 0 ?? 'isge_i' !! 'isle_i'),
@@ -340,21 +352,15 @@ class RakuAST::ForLoopImplementation
                 ),
                 QAST::Var.new( :name($last-name), :scope<local>, :returns(int) )
             ),
-            QAST::Op.new( :op<call>,
-                QAST::Var.new( :name($callee-name), :scope<local> ),
-                QAST::Var.new( :name($it-name), :scope<local>, :returns(int) )
-            )
+            $body-run
         );
 
         $context.ensure-sc($Nil);
-        self.IMPL-SET-NODE(
-            QAST::Stmts.new(
-                $bind-it,
-                $bind-last,
-                $bind-callee,
-                $loop,
-                QAST::WVal.new( :value($Nil) )
-            ), :key)
+        my $stmts := QAST::Stmts.new( $bind-it, $bind-last );
+        $stmts.push($bind-callee) unless $flatten;
+        $stmts.push($loop);
+        $stmts.push(QAST::WVal.new( :value($Nil) ));
+        self.IMPL-SET-NODE($stmts, :key)
     }
 
     # Whether a sunk statement-level for loop with the given body can
@@ -375,7 +381,7 @@ class RakuAST::ForLoopImplementation
     # has no loop phasers, matching the legacy p6forstmt op.
     method IMPL-TO-QAST-STATEMENT(RakuAST::IMPL::QASTContext $context,
             Mu $source-qast, Mu $body-qast, RakuAST::Label $label,
-            Mu $IterationEnd, Mu $Nil) {
+            Mu $IterationEnd, Mu $Nil, :$flatten-body) {
         # Bind the source into a temporary.
         my $for-target-name := QAST::Node.unique('for_target');
         my $bind-target := QAST::Op.new(
@@ -417,21 +423,35 @@ class RakuAST::ForLoopImplementation
         );
 
         # Bind the underlying VM code ref of the body so each iteration
-        # invokes it without going through the code object.
+        # invokes it without going through the code object. A flattened
+        # body runs inline instead, with the pulled value bound to its
+        # argument declaration.
+        my int $flatten := nqp::isconcrete($flatten-body);
         my $block-name := QAST::Node.unique('for_block');
-        my $bind-block := QAST::Op.new(
-            :op('bind'),
-            QAST::Var.new( :name($block-name), :scope('local'), :decl('var') ),
-            QAST::Op.new(
-                :op('getattr'),
-                $body-qast,
-                QAST::WVal.new( :value(Code) ),
-                QAST::SVal.new( :value('$!do') )
-            )
-        );
+        my $bind-block;
+        unless $flatten {
+            $bind-block := QAST::Op.new(
+                :op('bind'),
+                QAST::Var.new( :name($block-name), :scope('local'), :decl('var') ),
+                QAST::Op.new(
+                    :op('getattr'),
+                    $body-qast,
+                    QAST::WVal.new( :value(Code) ),
+                    QAST::SVal.new( :value('$!do') )
+                )
+            );
+        }
 
-        # Pull values until IterationEnd, calling the body with each one.
+        # Pull values until IterationEnd, running the body with each one.
         my $iter-val-name := QAST::Node.unique('for_iterval');
+        my $body-run := $flatten
+            ?? $flatten-body.IMPL-QAST-FLATTENED-WITH-ARG($context,
+                QAST::Var.new( :name($iter-val-name), :scope('local') ))
+            !! QAST::Op.new(
+                :op('call'),
+                QAST::Var.new( :name($block-name), :scope('local') ),
+                QAST::Var.new( :name($iter-val-name), :scope('local') )
+            );
         my $loop := QAST::Op.new(
             :op('until'),
             QAST::Op.new(
@@ -449,11 +469,7 @@ class RakuAST::ForLoopImplementation
                 ),
                 QAST::Var.new( :name($iteration-end-name), :scope('local') )
             ),
-            QAST::Op.new(
-                :op('call'),
-                QAST::Var.new( :name($block-name), :scope('local') ),
-                QAST::Var.new( :name($iter-val-name), :scope('local') )
-            )
+            $body-run
         );
         if $label {
             my $label-qast := $label.IMPL-LOOKUP-QAST($context);
@@ -462,15 +478,11 @@ class RakuAST::ForLoopImplementation
         }
 
         $context.ensure-sc($Nil);
-        self.IMPL-SET-NODE(
-            QAST::Stmts.new(
-                $bind-target,
-                $bind-iterator,
-                $bind-iteration-end,
-                $bind-block,
-                $loop,
-                QAST::WVal.new( :value($Nil) )
-            ), :key)
+        my $stmts := QAST::Stmts.new( $bind-target, $bind-iterator, $bind-iteration-end );
+        $stmts.push($bind-block) unless $flatten;
+        $stmts.push($loop);
+        $stmts.push(QAST::WVal.new( :value($Nil) ));
+        self.IMPL-SET-NODE($stmts, :key)
     }
 
     # The most general, least optimized, form for a `for` loop, which
@@ -1855,6 +1867,18 @@ class RakuAST::Statement::Given
     }
 
     method IMPL-TO-QAST(RakuAST::IMPL::QASTContext $context) {
+        if $!body.IMPL-FLATTEN-APPROVED {
+            my $source-name := QAST::Node.unique('given_source');
+            return QAST::Stmts.new(
+                QAST::Op.new(
+                    :op('bind'),
+                    QAST::Var.new( :name($source-name), :scope('local'), :decl('var') ),
+                    $!source.IMPL-TO-QAST($context)
+                ),
+                $!body.IMPL-QAST-FLATTENED-WITH-ARG($context,
+                    QAST::Var.new( :name($source-name), :scope('local') ))
+            );
+        }
         QAST::Op.new(
             :op('call'),
             $!body.IMPL-TO-QAST($context),

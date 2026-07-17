@@ -55,6 +55,19 @@ class RakuAST::LexicalScope
         Nil
     }
 
+    # Register the original names of this scope's lowered declarations
+    # on the block, so backtraces and debuggers can still name them.
+    method IMPL-ADD-LOWERED-DEBUG-MAPPINGS(Mu $block) {
+        for self.IMPL-UNWRAP-LIST(self.ast-lexical-declarations()) {
+            if nqp::istype($_, RakuAST::VarDeclaration::Simple)
+                && $_.IMPL-LOWERED-LOCAL-NAME {
+                $block.add_local_debug_mapping(
+                    $_.IMPL-LOWERED-LOCAL-NAME, $_.lexical-name);
+            }
+        }
+        Nil
+    }
+
     method IMPL-QAST-DECLS(RakuAST::IMPL::QASTContext $context) {
         my $stmts := QAST::Stmts.new();
 
