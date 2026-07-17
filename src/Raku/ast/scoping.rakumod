@@ -541,7 +541,14 @@ class RakuAST::LexicalScope
                  }
             }
         }
-        elsif nqp::istype($qast, QAST::Block) || nqp::istype($qast, QAST::Stmt) || nqp::istype($qast, QAST::Stmts) || nqp::istype($qast, QAST::Want) {
+        elsif nqp::istype($qast, QAST::Want) {
+            # The alternates render the same computation as the primary in
+            # native kinds, which can never be a Failure, so only the primary
+            # is walked. The primary may appear again as an alternate, and
+            # walking it once keeps the cost linear.
+            self.IMPL-FATALIZE-QAST($qast[0], 0) if nqp::elems($qast.list);
+        }
+        elsif nqp::istype($qast, QAST::Block) || nqp::istype($qast, QAST::Stmt) || nqp::istype($qast, QAST::Stmts) {
             self.IMPL-FATALIZE-QAST($_, 0) for @($qast);
         }
     }

@@ -705,6 +705,14 @@ class RakuAST::VarDeclaration::Simple
     has Mu $!container-initializer;
     has Mu $!package;
 
+    # Set by the optimize pass on a plain array declaration initialized from
+    # a comma list, for lowering to a direct build of the list internals.
+    has int $!lowered-array-init;
+
+    method IMPL-SET-LOWERED-ARRAY-INIT() {
+        nqp::bindattr_i(self, RakuAST::VarDeclaration::Simple, '$!lowered-array-init', 1)
+    }
+
     method new(          str :$scope,
                RakuAST::Name :$desigilname!,
                          str :$sigil,
@@ -1687,12 +1695,17 @@ class RakuAST::VarDeclaration::Simple
                                         QAST::Var.new( :$name, :scope<lexical> ),
                                         self.IMPL-EXPLICIT-CONTAINER-VIVIFY-QAST($context, $of) ) );
                                 }
-                                $perform-init-qast := QAST::Op.new(
-                                  :op('callmethod'), :name('STORE'),
-                                  $invocant,
-                                  $init-qast,
-                                  QAST::WVal.new( :named('INITIALIZE'), :value(True) )
-                                );
+                                my $lowered := $!lowered-array-init
+                                    ?? self.IMPL-ARRAY-INIT-QAST($invocant, $init-qast)
+                                    !! nqp::null();
+                                $perform-init-qast := nqp::isnull($lowered)
+                                    ?? QAST::Op.new(
+                                         :op('callmethod'), :name('STORE'),
+                                         $invocant,
+                                         $init-qast,
+                                         QAST::WVal.new( :named('INITIALIZE'), :value(True) )
+                                       )
+                                    !! $lowered;
                             }
                         }
                         else {

@@ -493,6 +493,14 @@ class RakuAST::Infix
         nqp::bindattr_i(self, RakuAST::Infix, '$!chainstatic', 1)
     }
 
+    # Set by the optimize pass on the assignment of a comma list to a plain
+    # array variable, for lowering to a direct build of the list internals.
+    has int $!lowered-array-init;
+
+    method IMPL-SET-LOWERED-ARRAY-INIT() {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!lowered-array-init', 1)
+    }
+
     # Set by the optimize pass when this smartmatch reduces to a type check:
     # the type matched against, and the Junction type for the runtime topic
     # guard, or null when the matcher is Junction itself and needs no guard.
@@ -625,6 +633,16 @@ class RakuAST::Infix
                 $lhs_ast, $rhs_ast);
         }
         elsif $var_sigil eq '@' || $var_sigil eq '%' {
+            my $lowered := nqp::null();
+            if $!lowered-array-init {
+                my $store := QAST::Op.new(
+                    :op('callmethod'), :name('STORE'),
+                    $lhs_ast, $rhs_ast);
+                $store.nosink(1);
+                $lowered := self.IMPL-ARRAY-INIT-QAST($lhs_ast, $rhs_ast, $store);
+            }
+            return $lowered unless nqp::isnull($lowered);
+
             # While the scalar container store op would end up calling .STORE,
             # it may do it in a nested runloop, which gets pricey. This is a
             # simple heuristic check to try and avoid that by calling .STORE.

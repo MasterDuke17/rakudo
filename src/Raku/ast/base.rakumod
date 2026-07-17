@@ -702,6 +702,14 @@ class RakuAST::Node {
             $result := self.IMPL-COLLAPSE-TYPEMATCH($resolver, $expr);
         }
 
+        if $result =:= $expr {
+            $result := self.IMPL-REWRITE-SQUARE($resolver, $expr);
+        }
+
+        if $result =:= $expr {
+            $result := self.IMPL-UNROLL-SLICE($resolver, $expr);
+        }
+
         # Lowerings that direct code generation rather than replacing the
         # node register their marks here, gated on the optimize pass running.
         # They each drop a layer of operator dispatch or pin down a routine
@@ -715,6 +723,8 @@ class RakuAST::Node {
             self.IMPL-MARK-RANGE-FOR($resolver, $expr);
             self.IMPL-MARK-STATIC-CALL($resolver, $expr);
             self.IMPL-MARK-STATIC-CHAIN($resolver, $expr);
+            self.IMPL-MARK-RETURN-DECONT($resolver, $expr);
+            self.IMPL-MARK-ARRAY-INIT($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -919,6 +929,184 @@ class RakuAST::Node {
         Nil
     }
 
+    # Allow a routine to skip its return decontainerization when code
+    # generation can see the body's result is container-free. The shape
+    # check happens at code generation, where the body QAST exists; the mark
+    # only carries that the optimize pass ran.
+    method IMPL-MARK-RETURN-DECONT(RakuAST::Resolver $resolver, Mu $expr) {
+        $expr.IMPL-SET-ELIDE-RETURN-DECONT()
+            if nqp::istype($expr, RakuAST::Routine);
+        Nil
+    }
+
+    # Mark the initialization of a plain array from a comma list, both the
+    # declaration form and the assignment form, for lowering to a direct
+    # build of the list internals at code generation, skipping the STORE
+    # dispatch and the intermediate list the comma call builds.
+    method IMPL-MARK-ARRAY-INIT(RakuAST::Resolver $resolver, Mu $expr) {
+        if nqp::istype($expr, RakuAST::ApplyInfix) {
+            # The assignment form emits a runtime type guard with a STORE
+            # fallback, and both branches compile the operands, so an operand
+            # declaring a lexical must keep the plain STORE.
+            my $infix := $expr.infix;
+            $infix.IMPL-SET-LOWERED-ARRAY-INIT()
+                if nqp::istype($infix, RakuAST::Infix)
+                && $infix.operator eq '='
+                && nqp::istype($expr.left, RakuAST::Var::Lexical)
+                && $expr.left.is-resolved
+                && self.IMPL-PLAIN-ARRAY-DECL($expr.left.resolution)
+                && self.IMPL-CORE-COMMA-LIST($resolver, $expr.right)
+                && self.IMPL-DROPPABLE($expr.right);
+        }
+        elsif nqp::istype($expr, RakuAST::VarDeclaration::Simple) {
+            $expr.IMPL-SET-LOWERED-ARRAY-INIT()
+                if self.IMPL-PLAIN-ARRAY-DECL($expr)
+                && nqp::istype($expr.initializer, RakuAST::Initializer::Assign)
+                && self.IMPL-CORE-COMMA-LIST($resolver, $expr.initializer.expression);
+        }
+        Nil
+    }
+
+    # A plain lexical array declaration: no type, shape, where, twigil, or
+    # traits, so its container is the stock Array whose STORE the lowering
+    # replicates. A bind initializer disqualifies it, since the bound value
+    # replaces that container with anything, like a native array.
+    method IMPL-PLAIN-ARRAY-DECL(Mu $decl) {
+        nqp::istype($decl, RakuAST::VarDeclaration::Simple)
+          && $decl.sigil eq '@'
+          && $decl.twigil eq ''
+          && $decl.scope eq 'my'
+          && !nqp::isconcrete($decl.type)
+          && !nqp::isconcrete($decl.shape)
+          && !nqp::isconcrete($decl.where)
+          && !nqp::istype($decl.initializer, RakuAST::Initializer::Bind)
+          && nqp::elems(self.IMPL-UNWRAP-LIST($decl.traits)) == 0
+            ?? 1 !! 0
+    }
+
+    # An application of the core comma operator with plain operands.
+    method IMPL-CORE-COMMA-LIST(RakuAST::Resolver $resolver, Mu $expr) {
+        nqp::istype($expr, RakuAST::ApplyListInfix)
+          && nqp::istype($expr.infix, RakuAST::Infix)
+          && $expr.infix.operator eq ','
+          && nqp::elems(nqp::getattr($expr, RakuAST::ApplyListInfix, '$!adverbs')) == 0
+          && nqp::elems(self.IMPL-UNWRAP-LIST($expr.operands)) > 0
+          && self.IMPL-OPERATOR-IS-CORE($resolver, $expr.infix)
+            ?? 1 !! 0
+    }
+
+    # Whether a QAST subtree tolerates being compiled twice in one frame.
+    # The guarded array initialization places the same operand nodes in
+    # both branches, and compiling a declaration a second time collides
+    # ("Local ... already declared" for the locals a with modifier or an
+    # inlined metaop declares), while a block registers its frame per
+    # compilation. Such operands keep the plain STORE call.
+    method IMPL-QAST-SAFE-TO-RECOMPILE(Mu $qast) {
+        return 0 if nqp::istype($qast, QAST::Block);
+        return 0 if nqp::istype($qast, QAST::Var) && $qast.decl;
+        if nqp::istype($qast, QAST::Node) {
+            for @($qast) {
+                return 0 unless self.IMPL-QAST-SAFE-TO-RECOMPILE($_);
+            }
+        }
+        1
+    }
+
+    # The lowered initialization of a plain array from a comma list: bind a
+    # fresh reification buffer and a reifier whose future is the elements,
+    # then reify, the same layout the STORE method builds through dispatch.
+    # Null when the QAST is not the expected variable and core comma call
+    # shape, or when an operand cannot compile in both guard branches, and
+    # the caller then keeps the STORE call. A fallback, when given, guards
+    # the build behind a runtime check that the variable holds the stock
+    # Array: the declared container can be replaced by a bind, so the
+    # assignment form cannot rely on the declaration's shape.
+    method IMPL-ARRAY-INIT-QAST(Mu $var-qast, Mu $comma-qast, Mu $fallback?) {
+        return nqp::null() if $*COMPILING_CORE_SETTING;
+        return nqp::null() unless nqp::istype($var-qast, QAST::Var)
+            && nqp::istype($comma-qast, QAST::Op)
+            && ($comma-qast.op eq 'call' || $comma-qast.op eq 'callstatic')
+            && $comma-qast.name eq '&infix:<,>';
+        for @($comma-qast) {
+            return nqp::null() if $_.named;
+            return nqp::null()
+                if nqp::isconcrete($fallback)
+                && !self.IMPL-QAST-SAFE-TO-RECOMPILE($_);
+        }
+
+        my $Reifier := nqp::atkey(nqp::who(List), 'Reifier');
+        my $future := QAST::Op.new( :op<list> );
+        $future.set_children(@($comma-qast));
+        my $init := QAST::Stmts.new(
+            QAST::Op.new(
+                :op<callmethod>, :name('reify-until-lazy'),
+                QAST::Op.new(
+                    :op<getattr>,
+                    QAST::Op.new(
+                        :op<p6bindattrinvres>,
+                        QAST::Op.new(
+                            :op<p6bindattrinvres>,
+                            $var-qast,
+                            QAST::WVal.new(:value(List)),
+                            QAST::SVal.new(:value('$!reified')),
+                            QAST::Op.new(:op<create>,
+                                QAST::WVal.new(:value(IterationBuffer))),
+                        ),
+                        QAST::WVal.new(:value(List)),
+                        QAST::SVal.new(:value('$!todo')),
+                        QAST::Op.new(
+                            :op<p6bindattrinvres>,
+                            QAST::Op.new(
+                                :op<p6bindattrinvres>,
+                                QAST::Op.new(
+                                    :op<p6bindattrinvres>,
+                                    QAST::Op.new(:op<create>,
+                                        QAST::WVal.new(:value($Reifier))),
+                                    QAST::WVal.new(:value($Reifier)),
+                                    QAST::SVal.new(:value('$!reified')),
+                                    QAST::Op.new(
+                                        :op<getattr>,
+                                        $var-qast,
+                                        QAST::WVal.new(:value(List)),
+                                        QAST::SVal.new(:value('$!reified')),
+                                    )
+                                ),
+                                QAST::WVal.new(:value($Reifier)),
+                                QAST::SVal.new(:value('$!reification-target')),
+                                QAST::Op.new(
+                                    :op<callmethod>,
+                                    :name('reification-target'),
+                                    $var-qast,
+                                )
+                            ),
+                            QAST::WVal.new(:value($Reifier)),
+                            QAST::SVal.new(:value('$!future')),
+                            $future,
+                        ),
+                    ),
+                    QAST::WVal.new(:value(List)),
+                    QAST::SVal.new(:value('$!todo')),
+                ),
+            ),
+            $var-qast
+        );
+        $init.nosink(1);
+        if nqp::isconcrete($fallback) {
+            $init := QAST::Op.new(
+                :op<if>,
+                QAST::Op.new(
+                    :op<eqaddr>,
+                    QAST::Op.new( :op<what_nd>, $var-qast ),
+                    QAST::WVal.new(:value(Array)),
+                ),
+                $init,
+                $fallback,
+            );
+            $init.nosink(1);
+        }
+        $init
+    }
+
     # Whether a resolution's lexical is bound once, so the VM may resolve a
     # lookup of $name a single time and treat the result as a constant. Two
     # kinds of binding qualify. A setting routine: the setting binds each
@@ -1062,6 +1250,128 @@ class RakuAST::Node {
         $expr
     }
 
+    # Squaring by the core power operator becomes a multiply of the operand
+    # with itself: the power routine handles any exponent, bottoming out in a
+    # bignum power or libm pow, where the multiply is a single operation.
+    # Only a plain resolved variable qualifies, so no side effect is
+    # duplicated, and only one whose type rules out a Junction: a junction
+    # squares each eigenstate, but autothreads over both sides of a multiply,
+    # which builds a different junction. A native can never hold one; a boxed
+    # variable qualifies when its declared type and Junction are unrelated.
+    # The multiply emitted must itself be the core one in the node's scope.
+    # The soft pragma turns the rewrite off, since it bypasses the power
+    # routine that wrapping relies on.
+    method IMPL-REWRITE-SQUARE(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return $expr;
+        }
+
+        return $expr unless nqp::istype($expr, RakuAST::ApplyInfix);
+        my $infix := $expr.infix;
+        return $expr unless nqp::istype($infix, RakuAST::Infix)
+            && $infix.is-resolved
+            && $infix.operator eq '**';
+
+        # An exponent that is the literal integer 2.
+        my $right := $expr.right;
+        return $expr unless nqp::istype($right, RakuAST::IntLiteral);
+        my $exp := $right.compile-time-value;
+        return $expr if nqp::isbig_I($exp);
+        return $expr unless nqp::iseq_i(nqp::unbox_i($exp), 2);
+
+        # A plain resolved variable whose type rules out a Junction.
+        my $left := $expr.left;
+        return $expr unless nqp::istype($left, RakuAST::Var::Lexical)
+            && $left.is-resolved;
+        my $type := $left.return-type;
+        unless nqp::objprimspec($type) {
+            my $Junction := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Junction');
+            return $expr if nqp::isnull($Junction);
+            return $expr if $type =:= Mu;
+            return $expr unless nqp::can($type.HOW, 'archetypes')
+                && !$type.HOW.archetypes($type).generic;
+            return $expr if nqp::istype($type, $Junction)
+                || nqp::istype($Junction, $type);
+        }
+
+        return $expr if self.IMPL-IN-SOFT-SCOPE($resolver);
+        return $expr unless self.IMPL-OPERATOR-IS-CORE($resolver, $infix);
+        my $mul := $resolver.resolve-lexical('&infix:<*>');
+        return $expr unless nqp::isconcrete($mul)
+            && nqp::istype($mul, RakuAST::Declaration::External::Setting);
+
+        my $mul-op := RakuAST::Infix.new('*');
+        $mul-op.set-resolution($mul);
+        my $product := RakuAST::ApplyInfix.new(
+            :left($left), :infix($mul-op), :right($left));
+        $product.set-origin($expr.origin) if nqp::isconcrete($expr.origin);
+        $product
+    }
+
+    # A slice of a plain variable by literal integer indexes becomes the
+    # list of the AT-POS calls those indexes dispatch to, dropping the
+    # postcircumfix call and the index list it builds. Only a value use
+    # qualifies: as an assignment target the postcircumfix can extend the
+    # array for an index past the end, where AT-POS cannot, so a slice that
+    # is the left operand of any parent keeps the call. The comma and the
+    # postcircumfix operator must be the core ones in the node's scope.
+    method IMPL-UNROLL-SLICE(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return $expr;
+        }
+
+        return $expr unless nqp::istype($expr, RakuAST::ApplyPostfix);
+        my $postfix := $expr.postfix;
+        return $expr unless nqp::istype($postfix, RakuAST::Postcircumfix::ArrayIndex);
+        return $expr if nqp::isconcrete($postfix.assignee);
+        return $expr if nqp::elems(self.IMPL-UNWRAP-LIST($postfix.colonpairs));
+        return $expr if nqp::can(self, 'left')
+            && nqp::eqaddr(self.left, $expr);
+        my $operand := $expr.operand;
+        return $expr unless nqp::istype($operand, RakuAST::Var::Lexical)
+            && $operand.is-resolved;
+
+        my $semilist := $postfix.index;
+        return $expr unless nqp::istype($semilist, RakuAST::SemiList)
+            && $semilist.IMPL-IS-SINGLE-EXPRESSION;
+        my $statement := self.IMPL-UNWRAP-LIST($semilist.statements)[0];
+        return $expr if nqp::isconcrete($statement.condition-modifier)
+            || nqp::isconcrete($statement.loop-modifier);
+        my $list := $statement.expression;
+        return $expr unless nqp::istype($list, RakuAST::ApplyListInfix)
+            && nqp::istype($list.infix, RakuAST::Infix)
+            && $list.infix.operator eq ','
+            && nqp::elems(nqp::getattr($list, RakuAST::ApplyListInfix, '$!adverbs')) == 0
+            && self.IMPL-OPERATOR-IS-CORE($resolver, $list.infix);
+        my @indexes := self.IMPL-UNWRAP-LIST($list.operands);
+        for @indexes {
+            return $expr unless nqp::istype($_, RakuAST::IntLiteral);
+        }
+
+        return $expr if self.IMPL-IN-SOFT-SCOPE($resolver);
+        my $pc := $resolver.resolve-lexical('&postcircumfix:<[ ]>');
+        return $expr unless nqp::isconcrete($pc)
+            && nqp::istype($pc, RakuAST::Declaration::External::Setting);
+        my $comma := $resolver.resolve-lexical('&infix:<,>');
+        return $expr unless nqp::isconcrete($comma)
+            && nqp::istype($comma, RakuAST::Declaration::External::Setting);
+
+        my @calls;
+        for @indexes {
+            nqp::push(@calls, RakuAST::ApplyPostfix.new(
+                :operand($operand),
+                :postfix(RakuAST::Call::Method.new(
+                    :name(RakuAST::Name.from-identifier('AT-POS')),
+                    :args(RakuAST::ArgList.new($_))))));
+        }
+        my $comma-op := RakuAST::Infix.new(',');
+        $comma-op.set-resolution($comma);
+        my $unrolled := RakuAST::ApplyListInfix.new(
+            :infix($comma-op), :operands(@calls));
+        $unrolled.set-origin($expr.origin) if nqp::isconcrete($expr.origin);
+        $unrolled
+    }
+
     # Inline a dot-assignment to an assignment of the method call's result,
     # dropping the dispatcher. The call arrives as a `dispatch:<.=>` callmethod
     # whose first child is the target and whose second is the method name. The
@@ -1193,16 +1503,44 @@ class RakuAST::Node {
     }
 
     # Whether an expression may serve as an operand for compile-time
-    # evaluation: a literal, an enumeration value such as True, or a quoted
-    # string whose value is known at compile time, which is how a plain string
-    # literal parses. Any of these holds no variable reference, so replacing
-    # it cannot orphan a lowered lexical.
+    # evaluation: a literal, an enumeration value such as True, a quoted
+    # string whose value is known at compile time, which is how a plain
+    # string literal parses, or a reference to a constant declaration. A
+    # stash reference (a name with a trailing ::) is left out: it claims
+    # the resolved package as its value where evaluating it produces that
+    # package's stash.
     method IMPL-FOLDABLE-OPERAND(Mu $operand) {
-        nqp::isconcrete($operand)
-          && (nqp::istype($operand, RakuAST::Literal)
-               || (nqp::istype($operand, RakuAST::QuotedString)
-                    || nqp::istype($operand, RakuAST::Term::Enum))
-                  && $operand.has-compile-time-value)
+        return 0 unless nqp::isconcrete($operand);
+        return 1 if nqp::istype($operand, RakuAST::Literal);
+        if nqp::istype($operand, RakuAST::QuotedString)
+            || nqp::istype($operand, RakuAST::Term::Enum) {
+            return $operand.has-compile-time-value ?? 1 !! 0;
+        }
+        if nqp::istype($operand, RakuAST::Term::Name) {
+            return $operand.is-resolved
+                && self.IMPL-CONSTANT-RESOLUTION($operand.resolution)
+                && !$operand.name.is-package-lookup ?? 1 !! 0;
+        }
+        if nqp::istype($operand, RakuAST::Var::Lexical) {
+            return $operand.is-resolved
+                && self.IMPL-CONSTANT-RESOLUTION($operand.resolution) ?? 1 !! 0;
+        }
+        0
+    }
+
+    # Whether a resolution is a genuinely constant declaration, whose
+    # compile-time value is the value evaluating a reference to it produces.
+    # The compile-time-value protocol alone cannot vouch for that: a plain
+    # variable declaration claims a value too, giving its container default.
+    # A containerized value is no constant either: an our-scoped variable
+    # imports as its Scalar container, whose value a later assignment can
+    # replace.
+    method IMPL-CONSTANT-RESOLUTION(Mu $decl) {
+        (nqp::istype($decl, RakuAST::VarDeclaration::Constant)
+          || nqp::istype($decl, RakuAST::VarDeclaration::Implicit::EnumValue)
+          || nqp::istype($decl, RakuAST::Declaration::External::Constant)
+          || nqp::istype($decl, RakuAST::Declaration::ResolvedConstant))
+          && !nqp::iscont($decl.compile-time-value)
             ?? 1 !! 0
     }
 
@@ -1228,9 +1566,8 @@ class RakuAST::Node {
     # Constant folding. Given a child expression, if it is a pure operator
     # applied to constant operands, evaluate it now and return a
     # RakuAST::Literal holding the result. Otherwise the expression is
-    # returned unchanged. Operands must satisfy IMPL-FOLDABLE-OPERAND (never
-    # variables, even constant ones) so folding never removes a variable
-    # reference, which keeps the later lexical-to-local lowering consistent.
+    # returned unchanged. Operands must satisfy IMPL-FOLDABLE-OPERAND, so a
+    # value only known at runtime never feeds an evaluation here.
     # The optimize walk is post-order, so a nested operator that has already
     # folded is itself a literal here, and nested constant arithmetic folds
     # up. Evaluation is guarded: a throw keeps the original runtime behaviour,

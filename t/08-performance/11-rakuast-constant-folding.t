@@ -3,7 +3,7 @@ use Test::Helpers;
 use Test;
 use experimental :rakuast;
 
-plan 39;
+plan 47;
 
 # Constant folding rewrites a pure operator on constant operands into the
 # literal result. The helper deparses a source after optimizing it, so
@@ -116,9 +116,39 @@ ok optimized-deparse(Q[my &infix:<zlex> = sub ($a, $b) { $a + $b }; my $y = 1 zl
     is (zfold 4 :x(5)), '4,5', 'a pure prefix operator with an adverb keeps its adverb';
 }
 
+# A resolved constant is a foldable operand: its declaration carries the
+# value the name evaluates to.
+ok optimized-deparse(Q[my constant K = 3; my $y = K * 2]).contains('= 6'),
+    'a constant folds as an operand';
+ok optimized-deparse(Q[my constant $K = 3; my $y = $K * 2]).contains('= 6'),
+    'a sigiled constant folds as an operand';
+ok optimized-deparse(Q[my constant K = 3; my $y = 1 + K * 2]).contains('= 7'),
+    'a constant folds up a nested chain';
+ok optimized-deparse(Q[my constant K = "ab"; my $y = K ~ "cd"]).contains('"abcd"'),
+    'a string constant folds as an operand';
+{ my constant K = 3; is K * 2, 6, 'a folded constant operand computes the same value'; }
+
+# A value only claimed at runtime keeps the operator, and so does a stash
+# reference, whose claimed value differs from what evaluating it produces.
+ok optimized-deparse(Q[my $x = 3; my $y = $x * 2]).contains('$x * 2'),
+    'a runtime variable keeps the operator';
+ok optimized-deparse(Q[class FoldPkg { }; my $y = FoldPkg:: eq "x"]).contains('eq'),
+    'a stash reference keeps the operator';
+
 # Str.AST does not optimize, so the operator survives. The scenarios above
 # therefore test the optimize pass, not something upstream.
 ok Q[my $x = 2 + 3].AST.DEPARSE.contains('2 + 3'),
     'the unoptimized tree keeps the operator';
+
+# An our-scoped variable imports as its Scalar container, whose value a
+# later assignment can replace, so it never feeds an evaluation.
+{
+    my $dir = make-temp-dir;
+    $dir.add('FoldContainerConst.rakumod').spurt: 'our $cv = 5';
+    is-deeply
+        EVAL(q[use lib $dir; use FoldContainerConst; $cv = 10; $cv + 1]),
+        11,
+        'an imported our-scoped variable reassigned at runtime computes with the new value';
+}
 
 # vim: expandtab shiftwidth=4
