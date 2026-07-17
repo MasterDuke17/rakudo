@@ -706,6 +706,10 @@ class RakuAST::Node {
             $result := self.IMPL-REWRITE-SQUARE($resolver, $expr);
         }
 
+        if $result =:= $expr {
+            $result := self.IMPL-UNROLL-SLICE($resolver, $expr);
+        }
+
         # Lowerings that direct code generation rather than replacing the
         # node register their marks here, gated on the optimize pass running.
         # They each drop a layer of operator dispatch or pin down a routine
@@ -1302,6 +1306,70 @@ class RakuAST::Node {
             :left($left), :infix($mul-op), :right($left));
         $product.set-origin($expr.origin) if nqp::isconcrete($expr.origin);
         $product
+    }
+
+    # A slice of a plain variable by literal integer indexes becomes the
+    # list of the AT-POS calls those indexes dispatch to, dropping the
+    # postcircumfix call and the index list it builds. Only a value use
+    # qualifies: as an assignment target the postcircumfix can extend the
+    # array for an index past the end, where AT-POS cannot, so a slice that
+    # is the left operand of any parent keeps the call. The comma and the
+    # postcircumfix operator must be the core ones in the node's scope.
+    method IMPL-UNROLL-SLICE(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return $expr;
+        }
+
+        return $expr unless nqp::istype($expr, RakuAST::ApplyPostfix);
+        my $postfix := $expr.postfix;
+        return $expr unless nqp::istype($postfix, RakuAST::Postcircumfix::ArrayIndex);
+        return $expr if nqp::isconcrete($postfix.assignee);
+        return $expr if nqp::elems(self.IMPL-UNWRAP-LIST($postfix.colonpairs));
+        return $expr if nqp::can(self, 'left')
+            && nqp::eqaddr(self.left, $expr);
+        my $operand := $expr.operand;
+        return $expr unless nqp::istype($operand, RakuAST::Var::Lexical)
+            && $operand.is-resolved;
+
+        my $semilist := $postfix.index;
+        return $expr unless nqp::istype($semilist, RakuAST::SemiList)
+            && $semilist.IMPL-IS-SINGLE-EXPRESSION;
+        my $statement := self.IMPL-UNWRAP-LIST($semilist.statements)[0];
+        return $expr if nqp::isconcrete($statement.condition-modifier)
+            || nqp::isconcrete($statement.loop-modifier);
+        my $list := $statement.expression;
+        return $expr unless nqp::istype($list, RakuAST::ApplyListInfix)
+            && nqp::istype($list.infix, RakuAST::Infix)
+            && $list.infix.operator eq ','
+            && nqp::elems(nqp::getattr($list, RakuAST::ApplyListInfix, '$!adverbs')) == 0
+            && self.IMPL-OPERATOR-IS-CORE($resolver, $list.infix);
+        my @indexes := self.IMPL-UNWRAP-LIST($list.operands);
+        for @indexes {
+            return $expr unless nqp::istype($_, RakuAST::IntLiteral);
+        }
+
+        return $expr if self.IMPL-IN-SOFT-SCOPE($resolver);
+        my $pc := $resolver.resolve-lexical('&postcircumfix:<[ ]>');
+        return $expr unless nqp::isconcrete($pc)
+            && nqp::istype($pc, RakuAST::Declaration::External::Setting);
+        my $comma := $resolver.resolve-lexical('&infix:<,>');
+        return $expr unless nqp::isconcrete($comma)
+            && nqp::istype($comma, RakuAST::Declaration::External::Setting);
+
+        my @calls;
+        for @indexes {
+            nqp::push(@calls, RakuAST::ApplyPostfix.new(
+                :operand($operand),
+                :postfix(RakuAST::Call::Method.new(
+                    :name(RakuAST::Name.from-identifier('AT-POS')),
+                    :args(RakuAST::ArgList.new($_))))));
+        }
+        my $comma-op := RakuAST::Infix.new(',');
+        $comma-op.set-resolution($comma);
+        my $unrolled := RakuAST::ApplyListInfix.new(
+            :infix($comma-op), :operands(@calls));
+        $unrolled.set-origin($expr.origin) if nqp::isconcrete($expr.origin);
+        $unrolled
     }
 
     # Inline a dot-assignment to an assignment of the method call's result,
