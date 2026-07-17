@@ -2468,6 +2468,17 @@ class RakuAST::VarDeclaration::Implicit
 {
     has str $.name;
 
+    # Set by the lexical-to-local lowering analysis when nothing in the
+    # declaring scope, and nothing reaching lexicals by name at run
+    # time, uses this implicit, so the scope can skip setting it up.
+    has int $!unused;
+
+    method IMPL-SET-UNUSED() {
+        nqp::bindattr_i(self, RakuAST::VarDeclaration::Implicit, '$!unused', 1)
+    }
+
+    method IMPL-UNUSED() { $!unused }
+
     method new(str :$name!, str :$scope) {
         my $obj := nqp::create(self);
         nqp::bindattr_s($obj, RakuAST::VarDeclaration::Implicit, '$!name', $name);
@@ -2538,6 +2549,7 @@ class RakuAST::VarDeclaration::Implicit::Special
     }
 
     method IMPL-QAST-DECL(RakuAST::IMPL::QASTContext $context) {
+        return QAST::Op.new( :op('null') ) if self.IMPL-UNUSED;
         my $container := self.meta-object;
         $context.ensure-sc($container);
         QAST::Var.new(
@@ -2595,6 +2607,7 @@ class RakuAST::VarDeclaration::Implicit::BlockTopic
     }
 
     method IMPL-QAST-DECL(RakuAST::IMPL::QASTContext $context) {
+        return QAST::Op.new( :op('null') ) if self.IMPL-UNUSED;
         if $!exception {
             QAST::Stmts.new(
                 QAST::Var.new( :decl('param'), :scope('local'), :name('EXCEPTION') ),
@@ -2747,6 +2760,7 @@ class RakuAST::VarDeclaration::Implicit::Cursor
     }
 
     method IMPL-QAST-DECL(RakuAST::IMPL::QASTContext $context) {
+        return QAST::Op.new( :op('null') ) if self.IMPL-UNUSED;
         my $container := self.meta-object;
         $context.ensure-sc($container);
         QAST::Var.new(
