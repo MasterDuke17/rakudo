@@ -3,7 +3,7 @@ use Test::Helpers::QAST;
 use Test;
 use QAST:from<NQP>;
 use nqp;
-plan 11;
+plan 15;
 
 # A routine declares fresh $_ and $¢ containers it usually never uses,
 # and a block binds its topic from the enclosing one. When nothing in
@@ -83,4 +83,36 @@ else {
     sub capturer() { my $c = { $seen = $_ }; $c(7) }
     capturer();
     is $seen, 7, 'a closure taking the topic as its argument still receives it';
+}
+
+# A method's implicit %_ goes the same way when unused, while the
+# slurpy parameter itself stays, so stray nameds are still accepted
+# and discarded.
+
+if nqp::ifnull(nqp::gethllsym('Raku', 'COMPILER-FRONTEND'), '') eq 'rakuast' {
+    qast-is 'my class C { method m() { 42 } }; say C.m', :full, -> \v {
+        not qast-var-decl(v, '%_', 'contvar')
+    }, 'a method that never touches %_ declares no hash for it';
+
+    qast-is 'my class C { method m() { %_.elems } }; say C.m', :full, -> \v {
+        qast-var-decl(v, '%_', 'contvar')
+    }, 'a method using the %_ placeholder keeps its hash';
+}
+else {
+    skip 'the %_ shapes are specific to the RakuAST frontend', 2;
+}
+
+{
+    my class C { method m() { 'ok' } }
+    is C.m(:stray, :other(2)), 'ok',
+        'a method with an unused %_ still accepts and discards stray nameds';
+}
+
+{
+    my class C {
+        has @.handles;
+        method new(*@handles) { self.bless(:@handles, |%_) }
+    }
+    is C.new(1, 2).handles.join(','), '1,2',
+        'flattening %_ into another call still works';
 }

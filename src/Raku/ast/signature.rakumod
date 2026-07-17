@@ -1365,7 +1365,12 @@ class RakuAST::Parameter
         my $param-qast := QAST::Var.new( :decl('param'), :scope('local'), :$name );
         my $temp-qast-var := QAST::Var.new( :name($name), :scope('local') );
 
-        # Deal with nameds and slurpies.
+        # Deal with nameds and slurpies. An unused implicit slurpy hash
+        # still accepts and discards stray nameds, but builds no hash.
+        my int $discard := nqp::isconcrete($!target)
+            && nqp::istype($!target, RakuAST::ParameterTarget::Var)
+            && nqp::isconcrete($!target.declaration)
+            && $!target.declaration.IMPL-UNUSED-SLURPY;
         my int $was-slurpy;
         my @prepend;
         if $!names {
@@ -1373,7 +1378,7 @@ class RakuAST::Parameter
         }
         elsif !($!slurpy =:= RakuAST::Parameter::Slurpy) {
             $!slurpy.IMPL-TRANSFORM-PARAM-QAST($context, $param-qast, $temp-qast-var,
-                $!target.sigil, $flags, @prepend);
+                $!target.sigil, $flags, @prepend, :discard($discard));
             $was-slurpy := 1;
         }
 
@@ -1713,7 +1718,7 @@ class RakuAST::Parameter
                         $temp-qast-var,
                     )));
         }
-        if nqp::isconcrete($!target) {
+        if nqp::isconcrete($!target) && !$discard {
             if $flags +& (
               nqp::const::SIG_ELEM_IS_RW +| nqp::const::SIG_ELEM_IS_RAW
             ) {
@@ -2345,7 +2350,7 @@ class RakuAST::Parameter::Slurpy {
     }
 
     method IMPL-TRANSFORM-PARAM-QAST(RakuAST::IMPL::QASTContext $context,
-            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend) {
+            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend, :$discard) {
         # Not slurply, so nothing to do
         $param-qast
     }
@@ -2375,7 +2380,7 @@ class RakuAST::Parameter::Slurpy::Flattened
     }
 
     method IMPL-TRANSFORM-PARAM-QAST(RakuAST::IMPL::QASTContext $context,
-            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend) {
+            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend, :$discard) {
         my int $is-rw := $flags +& nqp::const::SIG_ELEM_IS_RW;
         my int $is-raw := $flags +& nqp::const::SIG_ELEM_IS_RAW;
 
@@ -2398,7 +2403,7 @@ class RakuAST::Parameter::Slurpy::Flattened
                     QAST::SVal.new( :value('$!storage') ),
                     $temp-qast
                 )
-            ));
+            )) unless $discard;
         }
         elsif $sigil eq '$' || $sigil eq '&' {
             # Slurpiness on scalar and callable parameters does not actually have
@@ -2421,7 +2426,7 @@ class RakuAST::Parameter::Slurpy::Unflattened
     }
 
     method IMPL-TRANSFORM-PARAM-QAST(RakuAST::IMPL::QASTContext $context,
-            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend) {
+            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend, :$discard) {
         my int $is-rw := $flags +& nqp::const::SIG_ELEM_IS_RW;
         my int $is-raw := $flags +& nqp::const::SIG_ELEM_IS_RAW;
         if $sigil eq '@' {
@@ -2444,7 +2449,7 @@ class RakuAST::Parameter::Slurpy::SingleArgument
     }
 
     method IMPL-TRANSFORM-PARAM-QAST(RakuAST::IMPL::QASTContext $context,
-            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend) {
+            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend, :$discard) {
         my int $is-rw := $flags +& nqp::const::SIG_ELEM_IS_RW;
         my int $is-raw := $flags +& nqp::const::SIG_ELEM_IS_RAW;
         if $sigil eq '@' || $sigil eq '' {
@@ -2465,7 +2470,7 @@ class RakuAST::Parameter::Slurpy::Capture
     }
 
     method IMPL-TRANSFORM-PARAM-QAST(RakuAST::IMPL::QASTContext $context,
-            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend) {
+            Mu $param-qast, Mu $temp-qast, str $sigil, int $flags, @prepend, :$discard) {
         # Sneak in a slurpy hash parameter too.
         $param-qast.slurpy(1);
         my $hash-param-name := $temp-qast.name ~ '_hash';

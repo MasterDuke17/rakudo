@@ -20,6 +20,7 @@ class RakuAST::IMPL::VarLoweringFrame {
     has int $!flatten-candidate;
     has int $!flatten-blocked;
     has Mu $!deferred-uses;
+    has str $!implicit-slurpy-id;
 
     method new(RakuAST::Node $node, int $is-scope) {
         my $obj := nqp::create(self);
@@ -68,6 +69,12 @@ class RakuAST::IMPL::VarLoweringFrame {
         Nil
     }
     method flatten-blocked() { $!flatten-blocked }
+
+    method set-implicit-slurpy-id(str $id) {
+        nqp::bindattr_s(self, RakuAST::IMPL::VarLoweringFrame, '$!implicit-slurpy-id', $id);
+        Nil
+    }
+    method implicit-slurpy-id() { $!implicit-slurpy-id }
 
     method add-deferred(str $id) {
         nqp::push($!deferred-uses, $id);
@@ -237,6 +244,21 @@ class RakuAST::IMPL::VarLowering {
         # declaration it wraps, so the target registers the declaration
         # under both identities, and the wrapped declaration itself is
         # skipped when the walk reaches it as a child.
+        # A %_ appearing in a method body is a slurpy hash placeholder
+        # node rather than a variable lookup, and it is what makes the
+        # signature's implicit slurpy hash matter.
+        if nqp::istype($node, RakuAST::VarDeclaration::Placeholder::SlurpyHash) {
+            my int $i := nqp::elems($!frames);
+            while --$i >= 0 {
+                my $frame := nqp::atpos($!frames, $i);
+                if $frame.implicit-slurpy-id {
+                    my $record := $frame.record-for-id($frame.implicit-slurpy-id);
+                    nqp::bindkey($record, 'used', 1) unless nqp::isnull($record);
+                    last;
+                }
+            }
+        }
+
         if nqp::istype($node, RakuAST::ParameterTarget::Var) {
             my $decl := $node.declaration;
             self.IMPL-REGISTER-DECL($decl, ~nqp::objectid($node))
@@ -342,6 +364,16 @@ class RakuAST::IMPL::VarLowering {
                     if nqp::istype($_, RakuAST::VarDeclaration::Implicit);
             }
         }
+        if $is-scope && nqp::istype($node, RakuAST::Routine)
+            && nqp::isconcrete($node.signature) {
+            my $slurpy := nqp::getattr($node.signature, RakuAST::Signature,
+                '$!implicit-slurpy-hash');
+            $frame.set-implicit-slurpy-id(
+                ~nqp::objectid($slurpy.target.declaration))
+                if nqp::isconcrete($slurpy)
+                && nqp::isconcrete($slurpy.target)
+                && nqp::isconcrete($slurpy.target.declaration);
+        }
         $frame
     }
 
@@ -390,6 +422,12 @@ class RakuAST::IMPL::VarLowering {
     # outward only through scopes whose own topic went unused.
     method IMPL-DECIDE-IMPLICITS(Mu $frame) {
         my int $poisoned := $frame.is-poisoned;
+        my str $slurpy-id := $frame.implicit-slurpy-id;
+        if $slurpy-id && !$poisoned {
+            my $record := $frame.record-for-id($slurpy-id);
+            nqp::atkey($record, 'decl').IMPL-SET-UNUSED-SLURPY()
+                unless nqp::isnull($record) || nqp::existskey($record, 'used');
+        }
         my $it := nqp::iterator($frame.implicit-records);
         while $it {
             my $record := nqp::iterval(nqp::shift($it));
@@ -684,6 +722,7 @@ class RakuAST::IMPL::VarLowering {
             my $frame := nqp::atpos($!frames, $i);
             my $record := $frame.record-for-id($id);
             unless nqp::isnull($record) {
+                nqp::bindkey($record, 'used', 1);
                 if $!begin-context {
                     nqp::bindkey($record, 'captured', 1);
                 }

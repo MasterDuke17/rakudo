@@ -724,6 +724,17 @@ class RakuAST::VarDeclaration::Simple
         nqp::bindattr_i(self, RakuAST::VarDeclaration::Simple, '$!lowered-array-init', 1)
     }
 
+    # Set by the lexical-to-local lowering analysis on a method's unused
+    # implicit %_ target: the slurpy parameter still accepts and
+    # discards stray nameds, but no hash is wrapped, declared, or bound.
+    has int $!unused-slurpy;
+
+    method IMPL-SET-UNUSED-SLURPY() {
+        nqp::bindattr_i(self, RakuAST::VarDeclaration::Simple, '$!unused-slurpy', 1)
+    }
+
+    method IMPL-UNUSED-SLURPY() { $!unused-slurpy }
+
     method IMPL-SET-LOWERED-TO-LOCAL(Mu $sentinel) {
         nqp::bindattr_i(self, RakuAST::VarDeclaration::Simple, '$!lowered-to-local', 1);
         nqp::bindattr(self, RakuAST::VarDeclaration::Simple, '$!lowered-away-sentinel', $sentinel);
@@ -1564,6 +1575,13 @@ class RakuAST::VarDeclaration::Simple
         my $of := $!where ?? $!type.meta-object !! self.IMPL-OF-TYPE;
 
         return QAST::Op.new(:op<null>) if $!already-declared;
+
+        # An unused implicit slurpy hash builds and binds no hash, but its
+        # lexical slot must still exist: the full binder, as run by
+        # is_bindable and capture binding, binds the parameter into the
+        # lexpad by name.
+        return QAST::Var.new( :scope('lexical'), :decl('var'), :name(self.name) )
+            if $!unused-slurpy;
 
         if $scope eq 'my' && !$!desigilname.is-multi-part {
             # Lexically scoped
