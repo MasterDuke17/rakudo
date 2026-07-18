@@ -743,6 +743,7 @@ class RakuAST::Node {
             self.IMPL-MARK-NATIVE-CONDITION($resolver, $expr);
             self.IMPL-MARK-WHEN-TYPEMATCH($resolver, $expr);
             self.IMPL-MARK-JUNCTION-FOLD($resolver, $expr);
+            self.IMPL-MARK-PARAM-WHERE-JUNCTION($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -1833,6 +1834,100 @@ class RakuAST::Node {
                 QAST::Var.new( :name($tmp), :scope<local>, :decl<var> ),
                 $other-qast),
             $result)
+    }
+
+    # Mark a parameter whose where constraint is a junction of type
+    # objects for an inline type check per eigenstate: the constraint
+    # closure's ACCEPTS comes down to asking whether the argument is any,
+    # or all, of the types. Only a parameter whose declared type keeps a
+    # Junction argument autothreading qualifies, so the constraint never
+    # sees a junction itself.
+    method IMPL-MARK-PARAM-WHERE-JUNCTION(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return Nil;
+        }
+        return Nil unless nqp::istype($expr, RakuAST::Parameter);
+        my $where := $expr.where;
+        return Nil unless nqp::isconcrete($where)
+            && nqp::istype($where, RakuAST::Block);
+        return Nil if self.IMPL-IN-SOFT-SCOPE($resolver);
+        my $Junction := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Junction');
+        return Nil if nqp::isnull($Junction);
+
+        # A declared type a Junction argument could bind to means the
+        # constraint itself can see a junction.
+        my $param-type := $expr.type;
+        if nqp::isconcrete($param-type) {
+            my $nominal := $param-type.compile-time-value;
+            return Nil if nqp::istype($Junction, nqp::decont($nominal));
+        }
+
+        # The written constraint is the invocant of the ACCEPTS call the
+        # begin-time wrapping built around it.
+        my $statements := $where.body.statement-list.IMPL-UNWRAP-LIST(
+            $where.body.statement-list.statements);
+        return Nil unless nqp::elems($statements) == 1
+            && nqp::istype($statements[0], RakuAST::Statement::Expression);
+        my $bool-call := $statements[0].expression;
+        return Nil unless nqp::istype($bool-call, RakuAST::ApplyPostfix);
+        my $accepts-call := $bool-call.operand;
+        return Nil unless nqp::istype($accepts-call, RakuAST::ApplyPostfix);
+        my $written := $accepts-call.operand;
+
+        my @types;
+        my int $all := 0;
+        if $written.has-compile-time-value {
+            my $value := nqp::decont($written.maybe-compile-time-value);
+            return Nil unless nqp::isconcrete($value)
+                && nqp::eqaddr($value.WHAT, $Junction);
+            my str $jtype := nqp::getattr($value, $Junction, '$!type');
+            return Nil unless $jtype eq 'any' || $jtype eq 'all';
+            $all := $jtype eq 'all';
+            my $states := nqp::getattr($value, $Junction, '$!eigenstates');
+            my int $n := nqp::elems($states);
+            return Nil if $n < 2;
+            my int $i := -1;
+            while ++$i < $n {
+                my $state := nqp::atpos($states, $i);
+                return Nil if nqp::isconcrete($state);
+                my $how := $state.HOW;
+                return Nil unless nqp::can($how, 'archetypes')
+                    && !$how.archetypes($state).generic;
+                my $accepts := nqp::tryfindmethod($state, 'ACCEPTS');
+                return Nil unless nqp::isconcrete($accepts)
+                    && nqp::can($accepts, 'IS-SETTING-ONLY')
+                    && nqp::istrue($accepts.IS-SETTING-ONLY(
+                        nqp::const::SIG_ELEM_DEFINED_ONLY));
+                nqp::push(@types, $state);
+            }
+        }
+        else {
+            my $constructor;
+            my $operands;
+            if nqp::istype($written, RakuAST::ApplyListInfix) {
+                $constructor := $written.infix;
+                $operands := $written.IMPL-UNWRAP-LIST($written.operands);
+            }
+            elsif nqp::istype($written, RakuAST::ApplyInfix) {
+                $constructor := $written.infix;
+                $operands := [$written.left, $written.right];
+            }
+            else {
+                return Nil;
+            }
+            return Nil unless nqp::istype($constructor, RakuAST::Infix)
+                && ((my str $op := $constructor.operator) eq '|' || $op eq '&')
+                && nqp::elems($operands) >= 2
+                && self.IMPL-OPERATOR-IS-CORE($resolver, $constructor);
+            $all := $op eq '&';
+            for $operands {
+                my $type := self.IMPL-TYPEMATCH-MATCHER-TYPE($_);
+                return Nil if nqp::isnull($type);
+                nqp::push(@types, $type);
+            }
+        }
+        $expr.IMPL-SET-WHERE-JUNCTION(@types, $all);
+        Nil
     }
 
     # The pieces a compile-time Pair matcher's smartmatch reduces to, or

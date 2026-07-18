@@ -548,6 +548,11 @@ class RakuAST::Parameter
     has RakuAST::Parameter::Slurpy $.slurpy;
     has RakuAST::Expression        $.default;
     has RakuAST::Expression        $.where;
+    # Set by the optimize pass when the where constraint is a junction of
+    # type objects: the types the argument is checked against inline, and
+    # whether it must be all of them rather than any.
+    has Mu $!where-junction-types;
+    has int $!where-junction-all;
     has RakuAST::Expression        $.array-shape;
     has RakuAST::Node              $.owner;
     has RakuAST::Package           $!package;
@@ -712,6 +717,11 @@ class RakuAST::Parameter
     method set-where(RakuAST::Expression $where) {
         nqp::bindattr(self, RakuAST::Parameter, '$!where', $where);
         Nil
+    }
+
+    method IMPL-SET-WHERE-JUNCTION(Mu @types, int $all) {
+        nqp::bindattr(self, RakuAST::Parameter, '$!where-junction-types', @types);
+        nqp::bindattr_i(self, RakuAST::Parameter, '$!where-junction-all', $all);
     }
 
     method set-target(RakuAST::ParameterTarget $target) {
@@ -1857,18 +1867,43 @@ class RakuAST::Parameter
         }
 
         if $!where {
-            $param-qast.push(
-                QAST::ParamTypeCheck.new(
-                    QAST::Op.new(
-                        :op<istrue>,
+            if nqp::islist($!where-junction-types) {
+                # The constraint is a junction of type objects: check the
+                # argument against each inline, short-circuiting the same
+                # way the junction's ACCEPTS would collapse.
+                my @types := $!where-junction-types;
+                my int $i := nqp::elems(@types);
+                my $check := nqp::null();
+                while --$i >= 0 {
+                    my $type := nqp::atpos(@types, $i);
+                    $context.ensure-sc($type);
+                    my $istype := QAST::Op.new(
+                        :op<istype>,
+                        $temp-qast-var,
+                        QAST::WVal.new( :value($type) ));
+                    $check := nqp::isnull($check)
+                        ?? $istype
+                        !! QAST::Op.new(
+                            :op($!where-junction-all ?? 'if' !! 'unless'),
+                            $istype,
+                            $check);
+                }
+                $param-qast.push(QAST::ParamTypeCheck.new($check));
+            }
+            else {
+                $param-qast.push(
+                    QAST::ParamTypeCheck.new(
                         QAST::Op.new(
-                            :op('callmethod'), :name('ACCEPTS'),
-                            $!where.IMPL-TO-QAST($context),
-                            $temp-qast-var
+                            :op<istrue>,
+                            QAST::Op.new(
+                                :op('callmethod'), :name('ACCEPTS'),
+                                $!where.IMPL-TO-QAST($context),
+                                $temp-qast-var
+                            )
                         )
                     )
-                )
-            );
+                );
+            }
         }
 
         if $!array-shape {

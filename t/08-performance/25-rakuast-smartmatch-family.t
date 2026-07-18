@@ -3,7 +3,7 @@ use Test::Helpers::QAST;
 use Test;
 use QAST:from<NQP>;
 use nqp;
-plan 19;
+plan 28;
 
 # The helper's walk does not descend a ParamTypeCheck, and a local name
 # identifies the unfolded junction more precisely than any op, so these
@@ -52,9 +52,12 @@ if nqp::ifnull(nqp::gethllsym('Raku', 'COMPILER-FRONTEND'), '') eq 'rakuast' {
         not qast-contains-unfold-local(v)
     }, 'a junction comparison whose value is used keeps the junction';
 
+    qast-is 'sub f($x where Int|Str) { 1 }; f(1)', :full, -> \v {
+        qast-deep-contains-op(v, 'istype')
+    }, 'a junction-of-types where constraint checks the types inline';
 }
 else {
-    skip 'the reduced shapes are specific to the RakuAST frontend', 5;
+    skip 'the reduced shapes are specific to the RakuAST frontend', 6;
 }
 
 # Behavior stays identical.
@@ -109,4 +112,21 @@ else {
     isa-ok $r, Junction, 'a junction comparison used as a value stays a Junction';
     my $j = 1|2;
     ok ?($x == $j), 'a junction in a variable is not unfolded and still autothreads';
+}
+
+{
+    sub f($x where Int|Str) { 'ok' }
+    is f(1), 'ok', 'an inline any-of-types constraint accepts a matching argument';
+    is f('a'), 'ok', 'the second type of the constraint accepts too';
+    dies-ok { f(1.5e0) }, 'a non-matching argument still rejects';
+    sub g($x where Int & Numeric) { 'ok' }
+    is g(1), 'ok', 'an all-of-types constraint accepts when every type matches';
+    dies-ok { g('a') }, 'an all-of-types constraint rejects a partial match';
+    subset SmallInt of Int where * < 10;
+    sub s($x where SmallInt|Str) { 'ok' }
+    is-deeply (s(3), s('z')), ('ok', 'ok'), 'a subset eigenstate accepts through its refinement';
+    dies-ok { s(50) }, 'a subset eigenstate rejects through its refinement';
+    multi w($x where Int|Str) { 'is' }
+    multi w($x) { 'other' }
+    is-deeply (w(1), w(3.5e0)), ('is', 'other'), 'multi dispatch over an inline constraint is unchanged';
 }
