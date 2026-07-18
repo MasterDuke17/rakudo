@@ -742,6 +742,7 @@ class RakuAST::Node {
             self.IMPL-MARK-CT-DISPATCH($resolver, $expr);
             self.IMPL-MARK-NATIVE-CONDITION($resolver, $expr);
             self.IMPL-MARK-WHEN-TYPEMATCH($resolver, $expr);
+            self.IMPL-MARK-JUNCTION-FOLD($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -1608,6 +1609,230 @@ class RakuAST::Node {
                     QAST::Op.new( :op<isconcrete>, $topic ),
                     $cmp,
                     QAST::WVal.new( :value($neg-bool) ))))
+    }
+
+    # Mark a chaining comparison in boolean position whose operand is a
+    # junction for unfolding into a short-circuit chain of comparisons:
+    # the boolean answer is the same, and the losing comparisons never
+    # run. Only an any or all junction qualifies, only in a context that
+    # wants plain truth, and only when every candidate of the comparison
+    # takes Any or narrower, so no candidate could have bound the
+    # junction itself in place of autothreading.
+    method IMPL-MARK-JUNCTION-FOLD(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return Nil;
+        }
+        if nqp::istype($expr, RakuAST::Statement::Loop) {
+            self.IMPL-TRY-JUNCTION-FOLD($resolver, $expr.condition)
+                if nqp::isconcrete($expr.condition);
+        }
+        elsif nqp::istype($expr, RakuAST::Statement::IfWith) {
+            self.IMPL-TRY-JUNCTION-FOLD($resolver, $expr.condition)
+                if $expr.IMPL-QAST-TYPE eq 'if';
+            for $expr.IMPL-UNWRAP-LIST($expr.elsifs) {
+                self.IMPL-TRY-JUNCTION-FOLD($resolver, $_.condition)
+                    if $_.IMPL-QAST-TYPE eq 'if';
+            }
+        }
+        elsif nqp::istype($expr, RakuAST::Statement::Unless) {
+            self.IMPL-TRY-JUNCTION-FOLD($resolver, $expr.condition);
+        }
+        elsif nqp::istype($expr, RakuAST::Statement::Expression) {
+            my $loop := $expr.loop-modifier;
+            self.IMPL-TRY-JUNCTION-FOLD($resolver, $loop.expression)
+                if nqp::isconcrete($loop)
+                && nqp::istype($loop, RakuAST::StatementModifier::WhileUntil);
+            my $cond := $expr.condition-modifier;
+            self.IMPL-TRY-JUNCTION-FOLD($resolver, $cond.expression)
+                if nqp::isconcrete($cond)
+                && (nqp::istype($cond, RakuAST::StatementModifier::If)
+                    && !nqp::istype($cond, RakuAST::StatementModifier::When)
+                    || nqp::istype($cond, RakuAST::StatementModifier::Unless));
+        }
+        elsif nqp::istype($expr, RakuAST::ApplyPrefix) {
+            my $prefix := $expr.prefix;
+            if nqp::istype($prefix, RakuAST::Prefix) {
+                my str $op := $prefix.operator;
+                if ($op eq '?' || $op eq '!' || $op eq 'so' || $op eq 'not')
+                    && self.IMPL-OPERATOR-IS-CORE($resolver, $prefix) {
+                    self.IMPL-TRY-JUNCTION-FOLD($resolver, $expr.operand);
+                }
+            }
+        }
+        Nil
+    }
+
+    method IMPL-TRY-JUNCTION-FOLD(RakuAST::Resolver $resolver, Mu $cond) {
+        return Nil unless nqp::istype($cond, RakuAST::ApplyInfix);
+        my $infix := $cond.infix;
+        return Nil unless nqp::istype($infix, RakuAST::Infix)
+            && $infix.is-resolved
+            && $infix.properties.chain;
+        my $left := $cond.left;
+        my $right := $cond.right;
+        return Nil if nqp::istype($left, RakuAST::ApplyInfix)
+            && nqp::istype($left.infix, RakuAST::Infix)
+            && $left.infix.properties.chain;
+        return Nil if nqp::istype($right, RakuAST::ApplyInfix)
+            && nqp::istype($right.infix, RakuAST::Infix)
+            && $right.infix.properties.chain;
+        return Nil unless self.IMPL-OPERATOR-IS-CORE($resolver, $infix);
+        return Nil if self.IMPL-IN-SOFT-SCOPE($resolver);
+        my $Junction := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Junction');
+        return Nil if nqp::isnull($Junction);
+        my int $side := 0;
+        $side := 1 if self.IMPL-JUNCTION-FOLD-OPERAND($resolver, $left, $Junction);
+        $side := 2 if !$side && self.IMPL-JUNCTION-FOLD-OPERAND($resolver, $right, $Junction);
+        return Nil unless $side;
+        # The other operand must not be junction-ish itself: two junctions
+        # thread into each other rather than short-circuiting.
+        my $other := $side == 1 ?? $right !! $left;
+        return Nil if self.IMPL-JUNCTION-FOLD-OPERAND($resolver, $other, $Junction);
+        return Nil if $other.has-compile-time-value
+            && nqp::istype(nqp::decont($other.maybe-compile-time-value), $Junction);
+        my $resolution := $infix.resolution;
+        my $routine;
+        if nqp::istype($resolution, RakuAST::CompileTimeValue) {
+            $routine := $resolution.compile-time-value;
+        }
+        elsif nqp::can($resolution, 'maybe-compile-time-value') {
+            $routine := $resolution.maybe-compile-time-value;
+        }
+        else {
+            return Nil;
+        }
+        return Nil unless nqp::isconcrete($routine)
+            && self.IMPL-JUNCTION-CHAIN-HANDLES-ANY($resolver, $routine);
+        $infix.IMPL-SET-JUNCTION-FOLD($side, $Junction);
+        Nil
+    }
+
+    # Whether a comparison operand is a junction the unfolding handles: a
+    # compile-time concrete any or all Junction of two or more
+    # eigenstates, or a call to the core | or & constructor.
+    method IMPL-JUNCTION-FOLD-OPERAND(RakuAST::Resolver $resolver, Mu $operand, Mu $Junction) {
+        if $operand.has-compile-time-value {
+            my $value := nqp::decont($operand.maybe-compile-time-value);
+            return 1 if nqp::isconcrete($value)
+                && nqp::eqaddr($value.WHAT, $Junction)
+                && ((my str $type := nqp::getattr($value, $Junction, '$!type')) eq 'any'
+                    || $type eq 'all')
+                && nqp::elems(nqp::getattr($value, $Junction, '$!eigenstates')) >= 2;
+            return 0;
+        }
+        my $constructor;
+        my $operands;
+        if nqp::istype($operand, RakuAST::ApplyListInfix) {
+            $constructor := $operand.infix;
+            $operands := $operand.IMPL-UNWRAP-LIST($operand.operands);
+        }
+        elsif nqp::istype($operand, RakuAST::ApplyInfix) {
+            $constructor := $operand.infix;
+            $operands := [$operand.left, $operand.right];
+        }
+        else {
+            return 0;
+        }
+        return 0 unless nqp::istype($constructor, RakuAST::Infix)
+            && ((my str $op := $constructor.operator) eq '|' || $op eq '&')
+            && nqp::elems($operands) >= 2
+            && self.IMPL-OPERATOR-IS-CORE($resolver, $constructor);
+        1
+    }
+
+    # Whether every candidate of the comparison takes Any or narrower for
+    # every parameter, so a junction argument always autothreads rather
+    # than binding to a candidate directly.
+    method IMPL-JUNCTION-CHAIN-HANDLES-ANY(RakuAST::Resolver $resolver, Mu $routine) {
+        CATCH {
+            return 0;
+        }
+        my $Any := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Any');
+        return 0 if nqp::isnull($Any);
+        my @candidates;
+        if nqp::can($routine, 'is_dispatcher') && $routine.is_dispatcher {
+            return 0 unless nqp::can($routine, 'onlystar') && $routine.onlystar;
+            for nqp::getattr($routine, Routine, '@!dispatchees') {
+                nqp::push(@candidates, $_);
+            }
+        }
+        else {
+            nqp::push(@candidates, $routine);
+        }
+        for @candidates {
+            my $sig := nqp::getattr($_, Code, '$!signature');
+            return 0 unless nqp::isconcrete($sig);
+            for nqp::getattr($sig, Signature, '@!params') {
+                return 0 unless nqp::istype(
+                    nqp::getattr($_, Parameter, '$!type'), $Any);
+            }
+        }
+        1
+    }
+
+    # An unfolded junction comparison: the plain operand, bound to a
+    # local so it evaluates once, compared against each eigenstate in a
+    # short-circuit chain, disjunctive for an any junction, conjunctive
+    # for an all one. Or null when the operand's code is not one of the
+    # junction shapes after all, and the plain comparison stands.
+    method IMPL-JUNCTION-FOLD-QAST(RakuAST::IMPL::QASTContext $context, str $chain-op, str $chain-name, Mu $left-qast, Mu $right-qast, int $side, Mu $Junction) {
+        my $junction-qast := $side == 1 ?? $left-qast !! $right-qast;
+        my $other-qast    := $side == 1 ?? $right-qast !! $left-qast;
+        my @eigen;
+        my int $conjunctive := 0;
+        if nqp::istype($junction-qast, QAST::WVal) {
+            my $value := $junction-qast.value;
+            return nqp::null() unless nqp::isconcrete($value)
+                && nqp::eqaddr($value.WHAT, $Junction);
+            my str $type := nqp::getattr($value, $Junction, '$!type');
+            return nqp::null() unless $type eq 'any' || $type eq 'all';
+            $conjunctive := $type eq 'all';
+            my $states := nqp::getattr($value, $Junction, '$!eigenstates');
+            my int $n := nqp::elems($states);
+            return nqp::null() if $n < 2;
+            my int $i := -1;
+            while ++$i < $n {
+                my $state := nqp::atpos($states, $i);
+                $context.ensure-sc($state);
+                nqp::push(@eigen, QAST::WVal.new( :value($state) ));
+            }
+        }
+        elsif nqp::istype($junction-qast, QAST::Op)
+            && ($junction-qast.op eq 'call' || $junction-qast.op eq 'callstatic')
+            && ($junction-qast.name eq '&infix:<|>' || $junction-qast.name eq '&infix:<&>') {
+            $conjunctive := $junction-qast.name eq '&infix:<&>';
+            my int $n := nqp::elems($junction-qast.list);
+            return nqp::null() if $n < 2;
+            my int $i := -1;
+            while ++$i < $n {
+                my $child := nqp::atpos($junction-qast.list, $i);
+                return nqp::null() if $child.named || $child.flat;
+                nqp::push(@eigen, $child);
+            }
+        }
+        else {
+            return nqp::null();
+        }
+        my str $tmp := QAST::Node.unique('junction_unfold');
+        my str $joiner := $conjunctive ?? 'if' !! 'unless';
+        my $result := nqp::null();
+        my int $i := nqp::elems(@eigen);
+        while --$i >= 0 {
+            my $other := QAST::Var.new( :name($tmp), :scope<local> );
+            my $cmp := $side == 1
+                ?? QAST::Op.new( :op($chain-op), :name($chain-name),
+                    nqp::atpos(@eigen, $i), $other )
+                !! QAST::Op.new( :op($chain-op), :name($chain-name),
+                    $other, nqp::atpos(@eigen, $i) );
+            $result := nqp::isnull($result)
+                ?? $cmp
+                !! QAST::Op.new( :op($joiner), $cmp, $result );
+        }
+        QAST::Stmts.new(
+            QAST::Op.new( :op<bind>,
+                QAST::Var.new( :name($tmp), :scope<local>, :decl<var> ),
+                $other-qast),
+            $result)
     }
 
     # The pieces a compile-time Pair matcher's smartmatch reduces to, or

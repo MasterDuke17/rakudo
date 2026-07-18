@@ -3,7 +3,31 @@ use Test::Helpers::QAST;
 use Test;
 use QAST:from<NQP>;
 use nqp;
-plan 13;
+plan 19;
+
+# The helper's walk does not descend a ParamTypeCheck, and a local name
+# identifies the unfolded junction more precisely than any op, so these
+# walk every child list themselves.
+
+sub qast-deep-contains-op (Mu $qast, Str:D $name --> Bool:D) {
+    if nqp::istype($qast, QAST::Op) && $qast.op eq $name {
+        return True;
+    }
+    for (try $qast.list) // () {
+        return True if nqp::istype($_, QAST::Node) && qast-deep-contains-op($_, $name);
+    }
+    False
+}
+
+sub qast-contains-unfold-local (Mu $qast --> Bool:D) {
+    if nqp::istype($qast, QAST::Var) && $qast.name.starts-with('junction_unfold') {
+        return True;
+    }
+    for (try $qast.list) // () {
+        return True if nqp::istype($_, QAST::Node) && qast-contains-unfold-local($_);
+    }
+    False
+}
 
 # The legacy frontend reduces through its own QAST optimizer, so the
 # shapes here are this frontend's.
@@ -20,9 +44,17 @@ if nqp::ifnull(nqp::gethllsym('Raku', 'COMPILER-FRONTEND'), '') eq 'rakuast' {
         not qast-contains-call(v, '&infix:<~~>')
     }, 'a Pair matcher compiles without the smartmatch dispatch';
 
+    qast-is 'my $x = 2; if $x == 1|2|3 { say 1 }', :full, -> \v {
+        qast-contains-unfold-local(v)
+    }, 'a junction comparison in boolean position unfolds to a short-circuit chain';
+
+    qast-is 'my $x = 2; my $r = $x == 1|2', :full, -> \v {
+        not qast-contains-unfold-local(v)
+    }, 'a junction comparison whose value is used keeps the junction';
+
 }
 else {
-    skip 'the reduced shapes are specific to the RakuAST frontend', 3;
+    skip 'the reduced shapes are specific to the RakuAST frontend', 5;
 }
 
 # Behavior stays identical.
@@ -58,4 +90,23 @@ else {
         'an Associative topic takes the full Pair match';
     my $p = (is-prime => True);
     ok 7 ~~ $p, 'a Pair in a variable keeps the full match and still matches';
+}
+
+{
+    my $x = 2;
+    my @r;
+    @r.push('any') if $x == 1|2|3;
+    @r.push('none') if $x == 4|5;
+    @r.push('all') if $x == 2&2;
+    @r.push('not-all') unless $x == 2&3;
+    is @r.join(','), 'any,all,not-all', 'unfolded junction conditions branch correctly';
+    my $a = 1;
+    my $b = 2;
+    @r = ();
+    @r.push('vars') if $x == $a|$b;
+    is @r.join, 'vars', 'a junction built from variables unfolds and still matches';
+    my $r = ($x == 1|2);
+    isa-ok $r, Junction, 'a junction comparison used as a value stays a Junction';
+    my $j = 1|2;
+    ok ?($x == $j), 'a junction in a variable is not unfolded and still autothreads';
 }

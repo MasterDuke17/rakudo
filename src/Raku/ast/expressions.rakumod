@@ -526,6 +526,17 @@ class RakuAST::Infix
         nqp::bindattr(self, RakuAST::Infix, '$!pairmatch-data', $data);
     }
 
+    # Set by the optimize pass when a junction operand of this comparison
+    # in boolean position unfolds to a short-circuit chain: which side
+    # holds the junction, and the Junction type for the shape checks.
+    has int $!junction-fold;
+    has Mu $!junction-fold-junction;
+
+    method IMPL-SET-JUNCTION-FOLD(int $side, Mu $junction) {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!junction-fold', $side);
+        nqp::bindattr(self, RakuAST::Infix, '$!junction-fold-junction', $junction);
+    }
+
     # Set by the optimize pass on the assignment of a comma list to a plain
     # array variable, for lowering to a direct build of the list internals.
     has int $!lowered-array-init;
@@ -629,6 +640,18 @@ class RakuAST::Infix
             my $inlined := self.IMPL-CT-INLINE-QAST(
                 $context, $!ct-inline-candidate, [$left-qast, $right-qast]);
             return $inlined unless nqp::isnull($inlined);
+        }
+
+        # A comparison in boolean position with a junction operand
+        # unfolds to short-circuit comparisons per eigenstate.
+        if $!junction-fold {
+            my $folded := self.IMPL-JUNCTION-FOLD-QAST($context,
+                self.properties.chain
+                    ?? ($!chainstatic ?? 'chainstatic' !! 'chain')
+                    !! 'call',
+                $name, $left-qast, $right-qast,
+                $!junction-fold, $!junction-fold-junction);
+            return $folded unless nqp::isnull($folded);
         }
 
         # Otherwise, it's called by finding the lexical sub to call, and
