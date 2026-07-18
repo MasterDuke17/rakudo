@@ -272,6 +272,12 @@ class RakuAST::Node {
                     if nqp::istype($visit, RakuAST::IMPL::ImmediateBlockUser) &&
                             $visit.IMPL-IMMEDIATELY-USES($node) {
                     }
+                    elsif nqp::istype($node, RakuAST::Block) && $node.IMPL-FLATTEN-APPROVED {
+                        # A flattened loop body's statements are emitted
+                        # inline by its loop; a block declaration for it
+                        # would re-emit them referencing locals of the
+                        # frame it flattened into.
+                    }
                     else {
                         my $code := $node.IMPL-QAST-DECL-CODE($context);
                         $stmts.push($code);

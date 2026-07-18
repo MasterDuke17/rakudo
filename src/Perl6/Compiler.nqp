@@ -253,7 +253,8 @@ class Perl6::Compiler is HLL::Compiler {
             my $optimize := %adverbs<optimize>;
             unless nqp::defined($optimize)
               && ($optimize eq 'off' || $optimize eq '0') {
-                $past.optimize($past.resolver);
+                $past.optimize($past.resolver,
+                    :interactive(%adverbs<interactive> ?? 1 !! 0));
             }
             return $past;
         }

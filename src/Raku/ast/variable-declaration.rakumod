@@ -709,8 +709,94 @@ class RakuAST::VarDeclaration::Simple
     # a comma list, for lowering to a direct build of the list internals.
     has int $!lowered-array-init;
 
+    # Set by the lexical-to-local lowering analysis when every access to
+    # this declaration is confined to the declaring frame, so it can be
+    # emitted as a frame-local rather than a by-name lexical. The
+    # sentinel is installed as a static lexical under the declared name,
+    # so by-name access from another frame (CALLER::, the binder's
+    # error-reporting failover) still finds a symbol and fails the same
+    # way it does for any lowered lexical.
+    has int $!lowered-to-local;
+    has str $!lowered-local-name;
+    has Mu $!lowered-away-sentinel;
+
     method IMPL-SET-LOWERED-ARRAY-INIT() {
         nqp::bindattr_i(self, RakuAST::VarDeclaration::Simple, '$!lowered-array-init', 1)
+    }
+
+    method IMPL-SET-LOWERED-TO-LOCAL(Mu $sentinel) {
+        nqp::bindattr_i(self, RakuAST::VarDeclaration::Simple, '$!lowered-to-local', 1);
+        nqp::bindattr(self, RakuAST::VarDeclaration::Simple, '$!lowered-away-sentinel', $sentinel);
+    }
+
+    method IMPL-LOWERED-TO-LOCAL() { $!lowered-to-local }
+
+    # The frame-local name for a lowered declaration, minted on first
+    # request so the declaration and every lookup agree regardless of
+    # emission order, or the empty string when this declaration stays a
+    # by-name lexical. Native scalars decline: their l-value accesses
+    # need a lexicalref, and QAST has no local equivalent. Declarations
+    # with an explicit container base type decline: their initialization
+    # emits by-name vivification lookups.
+    method IMPL-LOWERED-LOCAL-NAME() {
+        return $!lowered-local-name if $!lowered-local-name;
+        return '' unless $!lowered-to-local;
+        return '' if nqp::isnull($!lowered-away-sentinel);
+        return '' if $!already-declared
+            || self.scope ne 'my'
+            || $!desigilname.is-multi-part
+            || self.IMPL-HAS-EXPLICIT-CONTAINER-BASE-TYPE;
+        my $of := $!where ?? $!type.meta-object !! self.IMPL-OF-TYPE;
+        return '' if self.sigil eq '$' && nqp::objprimspec($of);
+        # The assignment emit paths choose their strategy from the QAST
+        # name's leading sigil, so the local keeps it. The declared name
+        # rides along for debuggability.
+        nqp::bindattr_s(self, RakuAST::VarDeclaration::Simple,
+            '$!lowered-local-name',
+            QAST::Node.unique(self.sigil ~ '__lowered_' ~ $!desigilname.canonicalize));
+        if nqp::atkey(nqp::getenvhash(), 'RAKUDO_LOWERING_DEBUG') {
+            my str $where := '';
+            my $origin := self.origin;
+            if nqp::isconcrete($origin) {
+                my $source := $origin.source;
+                $where := ' at ' ~ $source.original-file
+                    ~ ':' ~ $source.original-line($origin.from);
+            }
+            RakuAST::IMPL::VarLowering.IMPL-NOTE(
+                'lex2local: minted ' ~ $!lowered-local-name ~ ' for '
+                    ~ self.name ~ $where);
+        }
+        $!lowered-local-name
+    }
+
+    # The declaration form for a scope flattened into its user's frame:
+    # the local, refreshed with a clone of the container prototype on
+    # every entry, so each iteration of a flattened loop body gets its
+    # own container the way a per-iteration frame would have. A bound
+    # declaration has no container and needs no refresh.
+    method IMPL-QAST-DECL-FLATTENED(RakuAST::IMPL::QASTContext $context) {
+        my str $local-name := self.IMPL-LOWERED-LOCAL-NAME;
+        nqp::die('Cannot emit a flattened declaration that is not lowered')
+            unless $local-name;
+        my $decl := QAST::Var.new( :scope('local'), :decl('var'), :name($local-name) );
+        if $!initializer && $!initializer.is-binding {
+            $decl
+        }
+        else {
+            my $container := self.meta-object;
+            $context.ensure-sc($container);
+            QAST::Stmts.new(
+                $decl,
+                QAST::Op.new(
+                    :op('bind'),
+                    QAST::Var.new( :name($local-name), :scope('local') ),
+                    # clone_nd, since a plain clone would decontainerize
+                    # and clone the prototype's default value instead of
+                    # the container.
+                    QAST::Op.new( :op('clone_nd'), QAST::WVal.new( :value($container) ) )
+                )
+            )
+        }
     }
 
     method new(          str :$scope,
@@ -1511,22 +1597,45 @@ class RakuAST::VarDeclaration::Simple
             }
             elsif $!initializer && $!initializer.is-binding {
                 # Will be bound on first use, so just a declaration.
-                QAST::Var.new( :scope('lexical'), :decl('var'), :name(self.name) )
+                my str $local-name := self.IMPL-LOWERED-LOCAL-NAME;
+                if $local-name {
+                    $context.ensure-sc($!lowered-away-sentinel);
+                    QAST::Stmts.new(
+                        QAST::Var.new( :scope('lexical'), :decl('static'), :name(self.name),
+                            :value($!lowered-away-sentinel) ),
+                        QAST::Var.new( :scope('local'), :decl('var'), :name($local-name) )
+                    )
+                }
+                else {
+                    QAST::Var.new( :scope('lexical'), :decl('var'), :name(self.name) )
+                }
             }
             else {
                 # Need to vivify the object. Note: maybe we want to drop the
                 # contvar, though we'll need an alternative for BEGIN.
                 my $container := self.meta-object;
                 $context.ensure-sc($container);
-                my $qast := QAST::Var.new(
-                    :scope('lexical'), :decl('contvar'), :name(self.name),
-                    :value($container)
-                );
-                if self.IMPL-HAS-EXPLICIT-CONTAINER-BASE-TYPE {
-                    $qast := QAST::Op.new( :op('bind'), $qast,
-                      self.IMPL-EXPLICIT-CONTAINER-VIVIFY-QAST($context, $of) );
+                my str $local-name := self.IMPL-LOWERED-LOCAL-NAME;
+                if $local-name {
+                    $context.ensure-sc($!lowered-away-sentinel);
+                    QAST::Stmts.new(
+                        QAST::Var.new( :scope('lexical'), :decl('static'), :name(self.name),
+                            :value($!lowered-away-sentinel) ),
+                        QAST::Var.new( :scope('local'), :decl('contvar'), :name($local-name),
+                            :value($container) )
+                    )
                 }
-                $qast
+                else {
+                    my $qast := QAST::Var.new(
+                        :scope('lexical'), :decl('contvar'), :name(self.name),
+                        :value($container)
+                    );
+                    if self.IMPL-HAS-EXPLICIT-CONTAINER-BASE-TYPE {
+                        $qast := QAST::Op.new( :op('bind'), $qast,
+                          self.IMPL-EXPLICIT-CONTAINER-VIVIFY-QAST($context, $of) );
+                    }
+                    $qast
+                }
             }
         }
         elsif $scope eq 'our' || $!desigilname.is-multi-part {
@@ -1582,7 +1691,10 @@ class RakuAST::VarDeclaration::Simple
         my $qast;
         if $scope eq 'my' || $scope eq 'state' || $scope eq 'our' {
             my str $sigil := self.sigil;
-            my $var-access := QAST::Var.new( :$name, :scope<lexical> );
+            my str $local-name := self.IMPL-LOWERED-LOCAL-NAME;
+            my $var-access := $local-name
+                ?? QAST::Var.new( :name($local-name), :scope<local> )
+                !! QAST::Var.new( :$name, :scope<lexical> );
             my $of := self.IMPL-OF-TYPE;
 
             if $sigil eq '$' && (my int $prim-spec := nqp::objprimspec($of)) {
@@ -1758,18 +1870,25 @@ class RakuAST::VarDeclaration::Simple
     method IMPL-LOOKUP-QAST(RakuAST::IMPL::QASTContext $context, Mu :$rvalue) {
         my str $scope := self.scope;
         if $scope eq 'my' || $scope eq 'state' || $scope eq 'our' {
+            my str $local-name := self.IMPL-LOWERED-LOCAL-NAME;
             my str $scope := 'lexical';
             unless $rvalue {
                 # Potentially l-value native lookups need a lexicalref.
+                # A lowered declaration is never native, so its scope
+                # stays a plain local.
                 if self.sigil eq '$' && self.scope ne 'our' {
                     my $of := self.IMPL-OF-TYPE;
                     if nqp::objprimspec($of) && (!$!is-parameter || !$!is-ro) {
                         $scope := 'lexicalref';
                     }
-                    return QAST::Var.new( :name(self.name), :$scope, :returns($of) );
+                    return $local-name
+                        ?? QAST::Var.new( :name($local-name), :scope('local'), :returns($of) )
+                        !! QAST::Var.new( :name(self.name), :$scope, :returns($of) );
                 }
             }
-            QAST::Var.new( :name(self.name), :$scope )
+            $local-name
+                ?? QAST::Var.new( :name($local-name), :scope('local') )
+                !! QAST::Var.new( :name(self.name), :$scope )
         }
         elsif self.is-attribute {
             my $package := $!attribute-package.meta-object;
@@ -1795,9 +1914,12 @@ class RakuAST::VarDeclaration::Simple
         my str $scope := self.scope;
         my $native := nqp::objprimspec(self.IMPL-OF-TYPE);
         nqp::die('Can only compile bind to my-scoped variables') unless $scope eq 'my' || $scope eq 'state' || $scope eq 'our';
+        my str $local-name := self.IMPL-LOWERED-LOCAL-NAME;
         QAST::Op.new(
             :op('bind'),
-            QAST::Var.new( :name(self.name), :scope($native && $!is-rw ?? 'lexicalref' !! 'lexical') ),
+            $local-name
+                ?? QAST::Var.new( :name($local-name), :scope('local') )
+                !! QAST::Var.new( :name(self.name), :scope($native && $!is-rw ?? 'lexicalref' !! 'lexical') ),
             $source-qast
         )
     }

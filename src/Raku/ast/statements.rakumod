@@ -1244,11 +1244,17 @@ class RakuAST::Statement::IfWith
             !! [RakuAST::Type::Setting.new(RakuAST::Name.from-identifier('Empty'))]
     }
 
+    method IMPL-BRANCH-QAST(RakuAST::IMPL::QASTContext $context, Mu $body) {
+        nqp::istype($body, RakuAST::Block) && $body.IMPL-FLATTEN-APPROVED
+            ?? $body.IMPL-QAST-FLATTENED($context)
+            !! $body.IMPL-TO-QAST($context, :immediate)
+    }
+
     method IMPL-TO-QAST(RakuAST::IMPL::QASTContext $context) {
         # Start with the else (or Empty).
         my $cur-end;
         if $!else {
-            $cur-end := $!else.IMPL-TO-QAST($context, :immediate);
+            $cur-end := self.IMPL-BRANCH-QAST($context, $!else);
         }
         else {
             $cur-end :=
@@ -1262,7 +1268,7 @@ class RakuAST::Statement::IfWith
             $cur-end := QAST::Op.new(
                 :op($branch.IMPL-QAST-TYPE),
                 $branch.condition.IMPL-TO-QAST($context),
-                $branch.then.IMPL-TO-QAST($context, :immediate),
+                self.IMPL-BRANCH-QAST($context, $branch.then),
                 $cur-end
             );
         }
@@ -1271,7 +1277,7 @@ class RakuAST::Statement::IfWith
         QAST::Op.new(
             :op(self.IMPL-QAST-TYPE),
             $!condition.IMPL-TO-QAST($context),
-            $!then.IMPL-TO-QAST($context, :immediate),
+            self.IMPL-BRANCH-QAST($context, $!then),
             $cur-end
         )
     }
@@ -1389,7 +1395,9 @@ class RakuAST::Statement::Unless
         QAST::Op.new(
             :op('unless'),
             $!condition.IMPL-TO-QAST($context),
-            $!body.IMPL-TO-QAST($context, :immediate),
+            $!body.IMPL-FLATTEN-APPROVED
+                ?? $!body.IMPL-QAST-FLATTENED($context)
+                !! $!body.IMPL-TO-QAST($context, :immediate),
             self.IMPL-UNWRAP-LIST(self.get-implicit-lookups)[0].IMPL-TO-QAST($context)
         )
     }
@@ -1630,7 +1638,9 @@ class RakuAST::Statement::Loop
             my $loop-qast := QAST::Op.new(
                 :$op,
                 $!condition ?? $!condition.IMPL-TO-QAST($context) !! QAST::IVal.new( :value(1) ),
-                $!body.IMPL-TO-QAST($context, :immediate),
+                $!body.IMPL-FLATTEN-APPROVED
+                    ?? $!body.IMPL-QAST-FLATTENED($context)
+                    !! $!body.IMPL-TO-QAST($context, :immediate),
             );
             my @post;
             if @next-phasers {
