@@ -1594,6 +1594,30 @@ class RakuAST::Node {
             return RakuAST::Literal.from-value(nqp::hllboolfor($matches, 'Raku'));
         }
 
+        # A topic variable whose declared type already guarantees the match
+        # decides it now: every value the container can hold passes the
+        # check, and a declared type a Junction cannot satisfy rules out
+        # autothreading, while a matcher wide enough to admit a Junction
+        # does not autothread over one either. A failed guarantee proves
+        # nothing about the runtime value, so only success folds, and a
+        # subset's refinement must still run.
+        if !$is-subset && nqp::istype($left, RakuAST::Var::Lexical) && $left.is-resolved {
+            my $topic-type := $left.return-type;
+            my $resolution := $left.resolution;
+            if $topic-type =:= Mu
+                && nqp::istype($resolution, RakuAST::ParameterTarget::Var)
+                && nqp::isconcrete($resolution.declaration) {
+                try $topic-type := $resolution.declaration.return-type;
+            }
+            my int $guaranteed := 0;
+            try $guaranteed := nqp::can($topic-type.HOW, 'archetypes')
+                && !$topic-type.HOW.archetypes($topic-type).generic
+                && nqp::istype($topic-type, $type);
+            return RakuAST::Literal.from-value(
+                nqp::hllboolfor($negated ?? 0 !! 1, 'Raku'))
+                if $guaranteed;
+        }
+
         # Mark for code generation; the matcher being a Junction needs no
         # runtime guard.
         $infix.IMPL-SET-TYPEMATCH($type,
