@@ -717,6 +717,10 @@ class RakuAST::Node {
         }
 
         if $result =:= $expr {
+            $result := self.IMPL-COLLAPSE-DEAD-BRANCH($resolver, $expr);
+        }
+
+        if $result =:= $expr {
             $result := self.IMPL-REWRITE-SQUARE($resolver, $expr);
         }
 
@@ -2052,6 +2056,111 @@ class RakuAST::Node {
             return $expr;
         }
         RakuAST::Literal.from-value($value)
+    }
+
+    # A conditional whose condition's truth is known at compile time
+    # keeps only the code that could run. The taken branch, a block with
+    # a scope of its own, stands as a bare block statement, which the
+    # later analysis may flatten into the enclosing frame, and a false
+    # condition with no other branch leaves the statement's Empty value.
+    # The dropped branches are code the running program could never
+    # reach, and a dropped block confines its declarations, but a
+    # dropped condition is evaluated code, so every dropped condition
+    # must be droppable. A with part tests definedness and topicalizes
+    # its value, so only plain if parts collapse.
+    method IMPL-COLLAPSE-DEAD-BRANCH(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return $expr;
+        }
+        if nqp::istype($expr, RakuAST::Statement::IfWith) {
+            return $expr if nqp::elems(self.IMPL-UNWRAP-LIST($expr.labels));
+            return $expr unless $expr.IMPL-QAST-TYPE eq 'if';
+            my int $truth := self.IMPL-CONSTANT-TRUTH($resolver, $expr.condition);
+            return $expr if $truth < 0
+                || !self.IMPL-DROPPABLE($expr.condition);
+            if $truth {
+                return $expr unless self.IMPL-BRANCH-COLLAPSIBLE($expr.then);
+                for $expr.IMPL-UNWRAP-LIST($expr.elsifs) {
+                    return $expr unless self.IMPL-DROPPABLE($_.condition);
+                }
+                return self.IMPL-BRANCH-STATEMENT($expr.then);
+            }
+            return $expr if nqp::elems($expr.IMPL-UNWRAP-LIST($expr.elsifs));
+            my $else := $expr.else;
+            if nqp::isconcrete($else) {
+                return $expr unless self.IMPL-BRANCH-COLLAPSIBLE($else);
+                return self.IMPL-BRANCH-STATEMENT($else);
+            }
+            return self.IMPL-EMPTY-STATEMENT($resolver, $expr);
+        }
+        elsif nqp::istype($expr, RakuAST::Statement::Unless) {
+            return $expr if nqp::elems(self.IMPL-UNWRAP-LIST($expr.labels));
+            my int $truth := self.IMPL-CONSTANT-TRUTH($resolver, $expr.condition);
+            return $expr if $truth < 0
+                || !self.IMPL-DROPPABLE($expr.condition);
+            unless $truth {
+                return $expr unless self.IMPL-BRANCH-COLLAPSIBLE($expr.body);
+                return self.IMPL-BRANCH-STATEMENT($expr.body);
+            }
+            return self.IMPL-EMPTY-STATEMENT($resolver, $expr);
+        }
+        elsif nqp::istype($expr, RakuAST::Statement::Expression) {
+            return $expr if nqp::isconcrete($expr.loop-modifier)
+                || nqp::elems(self.IMPL-UNWRAP-LIST($expr.labels));
+            # A block statement under a condition modifier is invoked with
+            # the condition's value, so the modifier stays.
+            return $expr if nqp::istype($expr.expression, RakuAST::Block);
+            my $cond := $expr.condition-modifier;
+            return $expr unless nqp::isconcrete($cond);
+            my int $negated := nqp::istype($cond, RakuAST::StatementModifier::Unless);
+            return $expr unless $negated
+                || nqp::istype($cond, RakuAST::StatementModifier::If)
+                && !nqp::istype($cond, RakuAST::StatementModifier::When);
+            my int $truth := self.IMPL-CONSTANT-TRUTH($resolver, $cond.expression);
+            return $expr if $truth < 0
+                || !self.IMPL-DROPPABLE($cond.expression);
+            $truth := nqp::not_i($truth) if $negated;
+            if $truth {
+                # The statement runs unconditionally; only the test goes.
+                $expr.replace-condition-modifier(
+                    RakuAST::StatementModifier::Condition);
+                return $expr;
+            }
+            return $expr unless self.IMPL-DROPPABLE($expr.expression);
+            return self.IMPL-EMPTY-STATEMENT($resolver, $expr);
+        }
+        $expr
+    }
+
+    # Whether a surviving branch may stand alone: the if and unless
+    # statements invoke a branch that takes arguments, a pointy or one
+    # with placeholders, with the condition's value, so only a plain
+    # parameterless block runs the same on its own.
+    method IMPL-BRANCH-COLLAPSIBLE(Mu $block) {
+        nqp::eqaddr($block.WHAT, RakuAST::Block)
+            && !nqp::isconcrete($block.placeholder-signature)
+            && (!nqp::isconcrete($block.signature)
+                || nqp::elems($block.IMPL-UNWRAP-LIST(
+                    $block.signature.parameters)) == 0)
+    }
+
+    # The taken branch as a statement of its own: a bare block statement
+    # runs where it stands and yields its last statement's value, the
+    # same way the branch would have.
+    method IMPL-BRANCH-STATEMENT(Mu $block) {
+        my $statement := RakuAST::Statement::Expression.new(:expression($block));
+        $statement.mark-block-statement();
+        $statement
+    }
+
+    # A statement standing where dropped code stood, evaluating to the
+    # Empty a branchless conditional evaluates to.
+    method IMPL-EMPTY-STATEMENT(RakuAST::Resolver $resolver, Mu $expr) {
+        my $empty := $resolver.resolve-name-constant-in-setting(
+            RakuAST::Name.from-identifier('Empty'));
+        return $expr unless nqp::isconcrete($empty);
+        RakuAST::Statement::Expression.new(
+            :expression(RakuAST::Literal.from-value($empty.compile-time-value)))
     }
 
     # The links of a longer chain take part in the chain op protocol, so
