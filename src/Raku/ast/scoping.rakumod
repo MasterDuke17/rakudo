@@ -1125,6 +1125,87 @@ class RakuAST::Lookup
         }
         1
     }
+
+    # Splice the given routine's inline info in place of a call to it, with
+    # the argument code standing in for the parameter placeholders, or null
+    # when the routine carries no inline info. An argument used other than
+    # exactly once in the body is bound to a temporary first, so its code
+    # runs once regardless. A native reference argument bound to a
+    # never-rw parameter is downgraded to a value read, as the reference
+    # would only re-box on every use in the spliced body.
+    method IMPL-CT-INLINE-QAST(RakuAST::IMPL::QASTContext $context, Mu $routine, Mu @args-qast) {
+        my $info := nqp::getattr($routine, Routine, '$!inline_info');
+        return nqp::null() unless nqp::isconcrete($info) && nqp::istype($info, QAST::Node);
+        return nqp::null() if nqp::can($routine, 'soft') && $routine.soft;
+        RakuAST::IMPL::VarLowering.IMPL-NOTE("SPLICE " ~ $routine.name)
+            if nqp::existskey(nqp::getenvhash(), 'RAKUDO_INLINE_DEBUG');
+        my $sig := nqp::getattr($routine, Code, '$!signature');
+        my @params := nqp::isconcrete($sig)
+            ?? nqp::getattr($sig, Signature, '@!params')
+            !! nqp::list();
+        my @usages;
+        $info.count_inline_placeholder_usages(@usages);
+        my $inlined := QAST::Stmts.new();
+        my @fillers;
+        my int $n := nqp::elems(@args-qast);
+        my int $i := -1;
+        while ++$i < $n {
+            my $arg := nqp::atpos(@args-qast, $i);
+            # Every parameter of a routine with inline info is native. A
+            # native variable argument already carries its native type,
+            # but a literal's code offers the native form only where that
+            # form is wanted, and falls back to the boxed value anywhere
+            # else. The bound parameter would have been the native value
+            # throughout, so its native form stands in.
+            if $i < nqp::elems(@params) && nqp::istype($arg, QAST::Want) {
+                my int $ps := nqp::objprimspec(nqp::getattr(
+                    nqp::atpos(@params, $i), Parameter, '$!type'));
+                if $ps {
+                    my str $want := $ps == 1 ?? 'Ii' !! $ps == 2 ?? 'Nn' !! 'Ss';
+                    my int $j := 1;
+                    my int $alts := nqp::elems($arg.list);
+                    while $j < $alts {
+                        if nqp::atpos($arg.list, $j) eq $want {
+                            $arg := nqp::atpos($arg.list, $j + 1);
+                            last;
+                        }
+                        $j := $j + 2;
+                    }
+                }
+            }
+            unless $*COMPILING_CORE_SETTING {
+                if nqp::istype($arg, QAST::Var) && nqp::objprimspec($arg.returns) {
+                    my str $scope := $arg.scope;
+                    if ($scope eq 'lexicalref' || $scope eq 'attributeref')
+                        && self.IMPL-PARAM-NEVER-RW($routine, $i) {
+                        $arg.scope($scope eq 'lexicalref' ?? 'lexical' !! 'attribute');
+                    }
+                }
+            }
+            my $usage := nqp::atpos(@usages, $i);
+            if !nqp::isnull($usage) && $usage == 1 {
+                nqp::push(@fillers, $arg);
+            }
+            else {
+                my str $name := QAST::Node.unique('_inline_arg_');
+                $inlined.push(QAST::Op.new(
+                    :op('bind'),
+                    QAST::Var.new( :name($name), :scope('local'), :returns($arg.returns), :decl('var') ),
+                    $arg));
+                nqp::push(@fillers, QAST::Var.new( :name($name), :scope('local'), :returns($arg.returns) ));
+            }
+        }
+        $inlined.push($info.substitute_inline_placeholders(@fillers));
+        # The routine's return type, read raw: a method dispatch on the
+        # routine can not be made while the setting holding it is still
+        # being compiled.
+        if nqp::isconcrete($sig) {
+            my $returns := nqp::getattr($sig, Signature, '$!returns');
+            $inlined.returns($returns)
+                unless nqp::isnull($returns) || nqp::isconcrete($returns);
+        }
+        $inlined
+    }
 }
 
 # Details about an undeclared symbol.

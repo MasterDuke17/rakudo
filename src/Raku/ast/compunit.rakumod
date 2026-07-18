@@ -219,6 +219,9 @@ class RakuAST::CompUnit
     # (the tree is already checked, nothing is being declared), so a caller just
     # hands over a resolver.
     method optimize(RakuAST::Resolver $resolver, :$interactive?) {
+        # Diagnostic switch: turns compile-time dispatch decisions off so a
+        # suspect inlining can be ruled in or out without a rebuild.
+        my $*NO-CT-DISPATCH := nqp::existskey(nqp::getenvhash(), 'RAKUDO_NO_CT_DISPATCH');
         $resolver.push-scope(self);
         $!mainline.IMPL-OPTIMIZE($resolver);
         self.IMPL-OPTIMIZE($resolver);
