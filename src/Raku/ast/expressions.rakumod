@@ -516,6 +516,16 @@ class RakuAST::Infix
         nqp::bindattr(self, RakuAST::Infix, '$!litmatch-data', $data);
     }
 
+    # Set by the optimize pass when this smartmatch against a compile-time
+    # Pair reduces to asking the topic the method the key names.
+    has int $!pairmatch;
+    has Mu $!pairmatch-data;
+
+    method IMPL-SET-PAIRMATCH(Mu $data) {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!pairmatch', 1);
+        nqp::bindattr(self, RakuAST::Infix, '$!pairmatch-data', $data);
+    }
+
     # Set by the optimize pass on the assignment of a comma list to a plain
     # array variable, for lowering to a direct build of the list internals.
     has int $!lowered-array-init;
@@ -584,6 +594,8 @@ class RakuAST::Infix
         return self.IMPL-TYPEMATCH-QAST($context, $left-qast) if $!typematch;
         return self.IMPL-LITMATCH-QAST($context, $left-qast, $!litmatch-data,
             $!operator eq '!~~' ?? 1 !! 0) if $!litmatch;
+        return self.IMPL-PAIRMATCH-QAST($context, $left-qast, $!pairmatch-data,
+            $!operator eq '!~~' ?? 1 !! 0) if $!pairmatch;
 
         # Operators that map directly into a QAST op
         my constant QAST-OP := nqp::hash(

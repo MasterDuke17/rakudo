@@ -3,7 +3,7 @@ use Test::Helpers::QAST;
 use Test;
 use QAST:from<NQP>;
 use nqp;
-plan 9;
+plan 13;
 
 # The legacy frontend reduces through its own QAST optimizer, so the
 # shapes here are this frontend's.
@@ -16,9 +16,13 @@ if nqp::ifnull(nqp::gethllsym('Raku', 'COMPILER-FRONTEND'), '') eq 'rakuast' {
         not qast-contains-call(v, '&infix:<~~>')
     }, 'a literal matcher compiles without the smartmatch dispatch';
 
+    qast-is 'my $x = 5; my $r = $x ~~ :is-prime', :full, -> \v {
+        not qast-contains-call(v, '&infix:<~~>')
+    }, 'a Pair matcher compiles without the smartmatch dispatch';
+
 }
 else {
-    skip 'the reduced shapes are specific to the RakuAST frontend', 2;
+    skip 'the reduced shapes are specific to the RakuAST frontend', 3;
 }
 
 # Behavior stays identical.
@@ -44,4 +48,14 @@ else {
     my $j = any(1, 42);
     ok $j ~~ 42, 'a concrete Junction topic still autothreads a literal match';
     is 5 ~~ 5.0, True, 'both sides known folds through the literal ACCEPTS';
+}
+
+{
+    is-deeply (4 ~~ :is-prime, 7 ~~ :is-prime, 4 ~~ :!is-prime), (False, True, True),
+        'Pair matchers ask the method the key names';
+    my %h = e => 42;
+    is-deeply (%h ~~ :e, %h ~~ :!missing), (True, False),
+        'an Associative topic takes the full Pair match';
+    my $p = (is-prime => True);
+    ok 7 ~~ $p, 'a Pair in a variable keeps the full match and still matches';
 }

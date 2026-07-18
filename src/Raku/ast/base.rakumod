@@ -713,6 +713,10 @@ class RakuAST::Node {
         }
 
         if $result =:= $expr {
+            $result := self.IMPL-COLLAPSE-PAIRMATCH($resolver, $expr);
+        }
+
+        if $result =:= $expr {
             $result := self.IMPL-REWRITE-SQUARE($resolver, $expr);
         }
 
@@ -1606,6 +1610,115 @@ class RakuAST::Node {
                     QAST::WVal.new( :value($neg-bool) ))))
     }
 
+    # The pieces a compile-time Pair matcher's smartmatch reduces to, or
+    # null: the Pair, the method its key names, the Bool its value wants
+    # back, and the types the emission guards with. Only a Pair whose
+    # ACCEPTS no user candidate can intercept qualifies, and whose key
+    # and boolified value are decided at compile time.
+    method IMPL-PAIRMATCH-DATA(RakuAST::Resolver $resolver, Mu $matcher) {
+        CATCH {
+            return nqp::null();
+        }
+        return nqp::null() unless $matcher.has-compile-time-value;
+        my $pair := $matcher.maybe-compile-time-value;
+        my $Pair := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Pair');
+        my $Assoc := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Associative');
+        return nqp::null() if nqp::isnull($Pair) || nqp::isnull($Assoc);
+        return nqp::null() unless nqp::isconcrete($pair)
+            && nqp::istype($pair, $Pair)
+            && nqp::eqaddr($pair.WHAT, $Pair);
+        my $accepts := nqp::tryfindmethod($Pair, 'ACCEPTS');
+        return nqp::null() unless nqp::isconcrete($accepts)
+            && nqp::can($accepts, 'IS-SETTING-ONLY')
+            && nqp::istrue($accepts.IS-SETTING-ONLY(
+                nqp::const::SIG_ELEM_UNDEFINED_ONLY));
+        my str $method := $pair.key.Str;
+        my $expected := $pair.value.Bool;
+        return nqp::null() unless nqp::isconcrete($expected);
+        [$pair, $method, $expected, $Pair, $Assoc]
+    }
+
+    # A smartmatch against a compile-time Pair asks the topic the method
+    # the key names. Mark the reduced form for code generation.
+    method IMPL-COLLAPSE-PAIRMATCH(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return $expr;
+        }
+
+        return $expr unless nqp::istype($expr, RakuAST::ApplyInfix);
+        my $infix := $expr.infix;
+        return $expr unless nqp::istype($infix, RakuAST::Infix)
+            && $infix.is-resolved;
+        my str $op := $infix.operator;
+        return $expr unless $op eq '~~' || $op eq '!~~';
+        my $left := $expr.left;
+        return $expr if nqp::istype($left, RakuAST::ApplyInfix)
+            && nqp::istype($left.infix, RakuAST::Infix)
+            && $left.infix.properties.chain;
+        return $expr if nqp::istype(self, RakuAST::ApplyInfix)
+            && nqp::istype(self.infix, RakuAST::Infix)
+            && self.infix.properties.chain
+            && nqp::eqaddr(self.left, $expr);
+        return $expr unless self.IMPL-OPERATOR-IS-CORE($resolver, $infix);
+        return $expr if self.IMPL-IN-SOFT-SCOPE($resolver);
+        return $expr if nqp::objprimspec($left.return-type);
+
+        my $data := self.IMPL-PAIRMATCH-DATA($resolver, $expr.right);
+        return $expr if nqp::isnull($data);
+        $infix.IMPL-SET-PAIRMATCH($data);
+        $expr
+    }
+
+    # A reduced Pair match: the topic, bound to a local, answers the
+    # method the Pair's key names, and matches when the boolified answer
+    # is the Pair's boolified value. The reduction holds only for the
+    # method-asking ACCEPTS candidate, so an Associative or Pair topic
+    # takes the full match, whose candidates mean something else, and so
+    # does a topic without the method, whose failure explains itself
+    # better than a dispatch error would. A Junction topic autothreads in
+    # the method dispatch just as it would in the ACCEPTS one.
+    method IMPL-PAIRMATCH-QAST(RakuAST::IMPL::QASTContext $context, Mu $topic-qast, Mu @data, int $negated) {
+        my $pair     := @data[0];
+        my str $meth := @data[1];
+        my $expected := @data[2];
+        my $Pair     := @data[3];
+        my $Assoc    := @data[4];
+        $context.ensure-sc($pair);
+        $context.ensure-sc($expected);
+        $context.ensure-sc($Pair);
+        $context.ensure-sc($Assoc);
+        my str $tmp := QAST::Node.unique('pairmatch_topic');
+        my $topic := QAST::Var.new( :name($tmp), :scope<local> );
+        my $eligible := QAST::Op.new(
+            :op<if>,
+            QAST::Op.new( :op<can>, $topic, QAST::SVal.new( :value($meth) ) ),
+            QAST::Op.new(
+                :op<if>,
+                QAST::Op.new( :op<istype>, $topic, QAST::WVal.new( :value($Assoc) ) ),
+                QAST::IVal.new( :value(0) ),
+                QAST::Op.new( :op<not_i>,
+                    QAST::Op.new( :op<istype>, $topic, QAST::WVal.new( :value($Pair) ) ))),
+            QAST::IVal.new( :value(0) ));
+        my $answer := QAST::Op.new( :op<eqaddr>,
+            QAST::Op.new( :op<decont>,
+                QAST::Op.new( :op<callmethod>, :name<Bool>,
+                    QAST::Op.new( :op<callmethod>, :name($meth), $topic ))),
+            QAST::WVal.new( :value($expected) ));
+        $answer := QAST::Op.new( :op<not_i>, $answer ) if $negated;
+        my $fallback := QAST::Op.new( :op<callmethod>, :name($negated ?? 'not' !! 'Bool'),
+            QAST::Op.new( :op<callmethod>, :name<ACCEPTS>,
+                QAST::WVal.new( :value($pair) ),
+                $topic ));
+        QAST::Stmts.new(
+            QAST::Op.new( :op<bind>,
+                QAST::Var.new( :name($tmp), :scope<local>, :decl<var> ),
+                $topic-qast),
+            QAST::Op.new( :op<if>,
+                $eligible,
+                QAST::Op.new( :op<hllbool>, $answer ),
+                $fallback))
+    }
+
     # The compile-time type object a matcher node reduces to a type check
     # against, or null when it is anything else: the matcher must carry a
     # compile-time type-object value, non-generic, whose ACCEPTS no user
@@ -1657,6 +1770,10 @@ class RakuAST::Node {
             if nqp::istype($matcher, RakuAST::Literal) {
                 my $data := self.IMPL-LITMATCH-DATA($resolver, $matcher);
                 $when.IMPL-SET-LITMATCH($data) unless nqp::isnull($data);
+            }
+            elsif nqp::istype($matcher, RakuAST::ColonPair) {
+                my $data := self.IMPL-PAIRMATCH-DATA($resolver, $matcher);
+                $when.IMPL-SET-PAIRMATCH($data) unless nqp::isnull($data);
             }
             return Nil;
         }

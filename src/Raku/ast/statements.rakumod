@@ -2001,6 +2001,16 @@ class RakuAST::Statement::When
         nqp::bindattr(self, RakuAST::Statement::When, '$!litmatch-data', $data);
     }
 
+    # Set by the optimize pass when the matcher is a compile-time Pair
+    # that reduces to asking the topic the method its key names.
+    has int $!pairmatch;
+    has Mu $!pairmatch-data;
+
+    method IMPL-SET-PAIRMATCH(Mu $data) {
+        nqp::bindattr_i(self, RakuAST::Statement::When, '$!pairmatch', 1);
+        nqp::bindattr(self, RakuAST::Statement::When, '$!pairmatch-data', $data);
+    }
+
     method IMPL-TO-QAST(RakuAST::IMPL::QASTContext $context) {
         my $topic-qast :=
             self.IMPL-UNWRAP-LIST(self.get-implicit-lookups)[0].IMPL-TO-QAST($context);
@@ -2009,11 +2019,13 @@ class RakuAST::Statement::When
                 $!typematch-type, $!typematch-junction)
             !! $!litmatch
                 ?? self.IMPL-LITMATCH-QAST($context, $topic-qast, $!litmatch-data, 0)
-                !! QAST::Op.new(
-                    :op('callmethod'), :name('ACCEPTS'),
-                    $!condition.IMPL-TO-QAST($context),
-                    $topic-qast
-                );
+                !! $!pairmatch
+                    ?? self.IMPL-PAIRMATCH-QAST($context, $topic-qast, $!pairmatch-data, 0)
+                    !! QAST::Op.new(
+                        :op('callmethod'), :name('ACCEPTS'),
+                        $!condition.IMPL-TO-QAST($context),
+                        $topic-qast
+                    );
         QAST::Op.new(
             :op('if'),
             $sm-qast,
