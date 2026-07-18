@@ -3,7 +3,7 @@ use Test::Helpers::QAST;
 use Test;
 use QAST:from<NQP>;
 use nqp;
-plan 22;
+plan 34;
 
 # A conditional whose condition's truth is known at compile time keeps
 # only the code that could run, and a chaining comparison on constant
@@ -128,4 +128,66 @@ else {
     my class Boomy { method Bool() { die "boom" } }
     my \b = Boomy.new;
     dies-ok { if b { } }, 'a constant whose Bool throws keeps the throw at runtime';
+}
+
+# Statements after one that unconditionally leaves the surrounding code
+# never run, and are dropped unless they declare something or register
+# a phaser.
+
+if nqp::ifnull(nqp::gethllsym('Raku', 'COMPILER-FRONTEND'), '') eq 'rakuast' {
+    qast-is 'sub f() { return 5; say "deadstr" }; say f()', :full, -> \v {
+        not qast-contains-sval(v, 'deadstr')
+    }, 'statements after a return are dropped';
+
+    qast-is 'sub f() { return 5; my $k = 1; say "deadstr" }; say f()', :full, -> \v {
+        not qast-contains-sval(v, 'deadstr')
+    }, 'a declaring unreachable statement stays while its droppable neighbors go';
+
+    qast-is 'sub f() { die "x"; say "livestr" }; try f()', :full, -> \v {
+        qast-contains-sval(v, 'livestr')
+    }, 'statements after a die stay, since a handler can resume into them';
+
+    qast-is 'sub f() { return 5; say "deadstr"; CATCH { default { say "handlerstr" } } }; say f()', :full, -> \v {
+        qast-contains-sval(v, 'handlerstr') and not qast-contains-sval(v, 'deadstr')
+    }, 'a CATCH after a return stays while its droppable neighbors go';
+}
+else {
+    skip 'the unreachable-code shapes are specific to the RakuAST frontend', 4;
+}
+
+{
+    sub f() { return 5; say "dead" }
+    is f(), 5, 'a routine still returns its value with trailing code dropped';
+}
+
+{
+    sub f() { return 1; sub g() { 9 } }
+    is f(), 1, 'a routine declared after a return is kept, since its name hoists';
+    sub caller-test() { return 2; my $x = 3 }
+    is caller-test(), 2, 'an unreachable declaration is kept without running its initializer';
+}
+
+{
+    my $l;
+    sub f() { return 7; LEAVE $l = 'leave-ran' }
+    is f(), 7, 'a phaser after a return still registers';
+    is $l, 'leave-ran', 'and fires when the routine is left';
+}
+
+{
+    my @r;
+    sub f() { die "x"; @r.push('resumed') }
+    { f(); CATCH { default { .resume } } }
+    @r.push('end');
+    is @r.join(','), 'resumed,end', 'resuming after a die still reaches the following statements';
+}
+
+{
+    sub f() { return 5 if 1 > 2; 'fell-through' }
+    is f(), 'fell-through', 'a conditional return does not drop what follows';
+}
+
+{
+    lives-ok { EVAL 'return 1; CATCH { default { } }' },
+        'a CATCH after a mainline return still catches the control exception';
 }

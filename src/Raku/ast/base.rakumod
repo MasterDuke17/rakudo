@@ -748,6 +748,7 @@ class RakuAST::Node {
             self.IMPL-MARK-WHEN-TYPEMATCH($resolver, $expr);
             self.IMPL-MARK-JUNCTION-FOLD($resolver, $expr);
             self.IMPL-MARK-CHAIN-LINKS($resolver, $expr);
+            self.IMPL-DROP-UNREACHABLE($resolver, $expr);
             self.IMPL-MARK-PARAM-WHERE-JUNCTION($resolver, $expr);
         }
 
@@ -2056,6 +2057,81 @@ class RakuAST::Node {
             return $expr;
         }
         RakuAST::Literal.from-value($value)
+    }
+
+    # Whether a statement unconditionally leaves the surrounding code, so
+    # nothing after it in its statement list can run. Only the setting's
+    # return, return-rw, and exit qualify: their control transfer cannot
+    # be resumed into the following statements. A thrown exception can,
+    # since a handler's resume continues right after the throw, so die
+    # and its relatives do not qualify, and neither do the loop controls,
+    # whose control exceptions a CONTROL block can resume the same way.
+    method IMPL-STATEMENT-TERMINATES(RakuAST::Resolver $resolver, Mu $stmt) {
+        return 0 unless nqp::istype($stmt, RakuAST::Statement::Expression);
+        return 0 if nqp::isconcrete($stmt.condition-modifier)
+            || nqp::isconcrete($stmt.loop-modifier);
+        my $expr := $stmt.expression;
+        return 0 unless nqp::istype($expr, RakuAST::Call::Name)
+            && $expr.is-resolved
+            && $expr.name.is-identifier
+            && nqp::istype($expr.resolution, RakuAST::Declaration::External::Setting);
+        my str $name := $expr.name.canonicalize;
+        $name eq 'return' || $name eq 'return-rw' || $name eq 'exit'
+    }
+
+    # Statements following one that unconditionally leaves never run, so
+    # they are dropped from the list, each on its own: one that declares
+    # stays, since its lexical is visible regardless, and so does a
+    # phaser statement, whose begin-time registration outlives its
+    # position but whose spot in the list is left alone all the same.
+    method IMPL-DROP-UNREACHABLE(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return Nil;
+        }
+        return Nil unless nqp::istype(self, RakuAST::StatementList);
+        return Nil unless self.IMPL-STATEMENT-TERMINATES($resolver, $expr);
+        self.IMPL-DROP-UNREACHABLE-IN(self.IMPL-UNWRAP-LIST(self.statements), $expr);
+        self.IMPL-DROP-UNREACHABLE-IN(self.code-statements, $expr);
+        Nil
+    }
+
+    method IMPL-DROP-UNREACHABLE-IN(Mu $statements, Mu $expr) {
+        my int $n := nqp::elems($statements);
+        my int $found := -1;
+        my int $i := -1;
+        while ++$i < $n {
+            if nqp::eqaddr(nqp::atpos($statements, $i), $expr) {
+                $found := $i;
+                last;
+            }
+        }
+        return Nil if $found < 0;
+        my @kept;
+        my int $dropped := 0;
+        $i := $found;
+        while ++$i < $n {
+            my $following := nqp::atpos($statements, $i);
+            # A phaser's registration, and a CATCH or CONTROL block's
+            # installation as the scope's handler, hold wherever the
+            # statement sits, so they stay.
+            my int $declarative := nqp::istype($following, RakuAST::Statement::Catch)
+                || nqp::istype($following, RakuAST::Statement::Control)
+                || nqp::istype($following, RakuAST::Statement::Expression)
+                && nqp::istype($following.expression, RakuAST::StatementPrefix::Phaser);
+            if !$declarative && self.IMPL-DROPPABLE($following) {
+                $dropped := 1;
+            }
+            else {
+                nqp::push(@kept, $following);
+            }
+        }
+        if $dropped {
+            nqp::setelems($statements, $found + 1);
+            for @kept {
+                nqp::push($statements, $_);
+            }
+        }
+        Nil
     }
 
     # A conditional whose condition's truth is known at compile time
