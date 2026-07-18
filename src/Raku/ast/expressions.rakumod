@@ -537,6 +537,26 @@ class RakuAST::Infix
         nqp::bindattr(self, RakuAST::Infix, '$!junction-fold-junction', $junction);
     }
 
+    # An enclosing chain withdraws a link's reduced-smartmatch decisions:
+    # a link must stay a chain op for the chain protocol.
+    method IMPL-CLEAR-SMARTMATCH-MARKS() {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!typematch', 0);
+        nqp::bindattr_i(self, RakuAST::Infix, '$!litmatch', 0);
+        nqp::bindattr_i(self, RakuAST::Infix, '$!pairmatch', 0);
+        nqp::bindattr_i(self, RakuAST::Infix, '$!junction-fold', 0);
+        nqp::bindattr_i(self, RakuAST::Infix, '$!smartmatch-folded', 0);
+    }
+
+    # Set by the optimize pass when the smartmatch is decided outright in
+    # an argument position, where the node cannot be replaced.
+    has int $!smartmatch-folded;
+    has Mu $!smartmatch-fold-value;
+
+    method IMPL-SET-SMARTMATCH-FOLD(Mu $value) {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!smartmatch-folded', 1);
+        nqp::bindattr(self, RakuAST::Infix, '$!smartmatch-fold-value', $value);
+    }
+
     # Set by the optimize pass on the assignment of a comma list to a plain
     # array variable, for lowering to a direct build of the list internals.
     has int $!lowered-array-init;
@@ -602,6 +622,10 @@ class RakuAST::Infix
                               Mu $left-qast,
                               Mu $right-qast
     ) {
+        if $!smartmatch-folded {
+            $context.ensure-sc($!smartmatch-fold-value);
+            return QAST::WVal.new( :value($!smartmatch-fold-value) );
+        }
         return self.IMPL-TYPEMATCH-QAST($context, $left-qast) if $!typematch;
         return self.IMPL-LITMATCH-QAST($context, $left-qast, $!litmatch-data,
             $!operator eq '!~~' ?? 1 !! 0) if $!litmatch;

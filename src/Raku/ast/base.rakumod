@@ -743,6 +743,7 @@ class RakuAST::Node {
             self.IMPL-MARK-NATIVE-CONDITION($resolver, $expr);
             self.IMPL-MARK-WHEN-TYPEMATCH($resolver, $expr);
             self.IMPL-MARK-JUNCTION-FOLD($resolver, $expr);
+            self.IMPL-MARK-CHAIN-LINKS($resolver, $expr);
             self.IMPL-MARK-PARAM-WHERE-JUNCTION($resolver, $expr);
         }
 
@@ -1537,7 +1538,7 @@ class RakuAST::Node {
                     $matched := $matcher-value.ACCEPTS($topic-value);
                     $matched := $negated ?? $matched.not !! $matched.Bool;
                 }
-                return RakuAST::Literal.from-value($matched)
+                return self.IMPL-SMARTMATCH-FOLD-RESULT($expr, $matched)
                     unless nqp::isnull($matched);
             }
         }
@@ -1854,13 +1855,12 @@ class RakuAST::Node {
         my $Junction := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Junction');
         return Nil if nqp::isnull($Junction);
 
-        # A declared type a Junction argument could bind to means the
-        # constraint itself can see a junction.
-        my $param-type := $expr.type;
-        if nqp::isconcrete($param-type) {
-            my $nominal := $param-type.compile-time-value;
-            return Nil if nqp::istype($Junction, nqp::decont($nominal));
-        }
+        # A nominal type a Junction argument could bind to means the
+        # constraint itself can see a junction, and a block parameter's
+        # implicit Mu is such a type, so the meta-object's word is the
+        # one that counts.
+        my $nominal := nqp::getattr($expr.meta-object, Parameter, '$!type');
+        return Nil if nqp::istype($Junction, nqp::decont($nominal));
 
         # The written constraint is the invocant of the ACCEPTS call the
         # begin-time wrapping built around it.
@@ -2039,6 +2039,44 @@ class RakuAST::Node {
                 $fallback))
     }
 
+    # A decided smartmatch replaces the node with its answer, except in an
+    # argument position: there the offering parent is the argument list,
+    # which cannot tell a chain operand from any other argument, and a
+    # replaced chain link would no longer take part in the chain op
+    # protocol. In an argument position the answer is recorded on the
+    # operator instead, code generation emits it as the constant, and an
+    # enclosing chain can still withdraw it.
+    method IMPL-SMARTMATCH-FOLD-RESULT(Mu $expr, Mu $value) {
+        if nqp::istype(self, RakuAST::ArgList) {
+            $expr.infix.IMPL-SET-SMARTMATCH-FOLD($value);
+            return $expr;
+        }
+        RakuAST::Literal.from-value($value)
+    }
+
+    # The links of a longer chain take part in the chain op protocol, so
+    # none of them may compile to anything but a chain op. The reduced
+    # smartmatch marks decide per node and cannot see the enclosing
+    # chain, whose own offering comes only after its operands were
+    # visited, so the enclosing chain withdraws any decision its operand
+    # links took.
+    method IMPL-MARK-CHAIN-LINKS(RakuAST::Resolver $resolver, Mu $expr) {
+        return Nil unless nqp::istype($expr, RakuAST::ApplyInfix)
+            && nqp::istype($expr.infix, RakuAST::Infix)
+            && $expr.infix.properties.chain;
+        my $left := $expr.left;
+        $left.infix.IMPL-CLEAR-SMARTMATCH-MARKS()
+            if nqp::istype($left, RakuAST::ApplyInfix)
+            && nqp::istype($left.infix, RakuAST::Infix)
+            && $left.infix.properties.chain;
+        my $right := $expr.right;
+        $right.infix.IMPL-CLEAR-SMARTMATCH-MARKS()
+            if nqp::istype($right, RakuAST::ApplyInfix)
+            && nqp::istype($right.infix, RakuAST::Infix)
+            && $right.infix.properties.chain;
+        Nil
+    }
+
     # The compile-time type object a matcher node reduces to a type check
     # against, or null when it is anything else: the matcher must carry a
     # compile-time type-object value, non-generic, whose ACCEPTS no user
@@ -2206,7 +2244,8 @@ class RakuAST::Node {
             && self.IMPL-DROPPABLE($left) && self.IMPL-DROPPABLE($right) {
             my int $matches := nqp::istype($left-value, $type);
             $matches := nqp::not_i($matches) if $negated;
-            return RakuAST::Literal.from-value(nqp::hllboolfor($matches, 'Raku'));
+            return self.IMPL-SMARTMATCH-FOLD-RESULT($expr,
+                nqp::hllboolfor($matches, 'Raku'));
         }
 
         # A topic variable whose declared type already guarantees the match
@@ -2228,7 +2267,7 @@ class RakuAST::Node {
             try $guaranteed := nqp::can($topic-type.HOW, 'archetypes')
                 && !$topic-type.HOW.archetypes($topic-type).generic
                 && nqp::istype($topic-type, $type);
-            return RakuAST::Literal.from-value(
+            return self.IMPL-SMARTMATCH-FOLD-RESULT($expr,
                 nqp::hllboolfor($negated ?? 0 !! 1, 'Raku'))
                 if $guaranteed;
         }
