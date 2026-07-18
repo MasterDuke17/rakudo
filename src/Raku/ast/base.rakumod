@@ -2618,10 +2618,15 @@ class RakuAST::Node {
             # nesting suggests. Folding the inner comparison to a literal would
             # drop that operand and change the result, so chaining infixes are
             # left for runtime.
+            # A chaining comparison folds too: the foldable-operand bound
+            # already rules out a nested chain link as an operand, and when
+            # this application is itself the link of a longer chain, the
+            # argument-position delivery below leaves the node in place, so
+            # the enclosing chain can withdraw the answer and keep its
+            # middle-operand sharing.
             $foldable := nqp::istype($infix, RakuAST::Infix)
                 && $infix.is-resolved
                 && self.IMPL-PURE-ROUTINE($infix)
-                && !$infix.properties.chain
                 && !nqp::isconcrete($expr.args.arg-at-pos(2))
                 && self.IMPL-FOLDABLE-OPERAND($expr.left)
                 && self.IMPL-FOLDABLE-OPERAND($expr.right);
@@ -2670,6 +2675,12 @@ class RakuAST::Node {
         return $expr unless @result[0];
         my $value := @result[1];
         return $expr unless self.IMPL-FOLDABLE-VALUE($resolver, $value);
+
+        if nqp::istype($expr, RakuAST::ApplyInfix)
+            && nqp::istype($expr.infix, RakuAST::Infix)
+            && $expr.infix.properties.chain {
+            return self.IMPL-SMARTMATCH-FOLD-RESULT($expr, $value);
+        }
 
         my $literal := RakuAST::Literal.from-value($value);
         $literal.set-origin($expr.origin) if nqp::isconcrete($expr.origin);
