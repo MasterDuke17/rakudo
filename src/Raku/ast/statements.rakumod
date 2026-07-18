@@ -1991,17 +1991,29 @@ class RakuAST::Statement::When
         nqp::bindattr(self, RakuAST::Statement::When, '$!typematch-junction', $junction);
     }
 
+    # Set by the optimize pass when the matcher reduces to a literal
+    # comparison against the topic.
+    has int $!litmatch;
+    has Mu $!litmatch-data;
+
+    method IMPL-SET-LITMATCH(Mu $data) {
+        nqp::bindattr_i(self, RakuAST::Statement::When, '$!litmatch', 1);
+        nqp::bindattr(self, RakuAST::Statement::When, '$!litmatch-data', $data);
+    }
+
     method IMPL-TO-QAST(RakuAST::IMPL::QASTContext $context) {
         my $topic-qast :=
             self.IMPL-UNWRAP-LIST(self.get-implicit-lookups)[0].IMPL-TO-QAST($context);
         my $sm-qast := $!typematch
             ?? self.IMPL-WHEN-TYPEMATCH-QAST($context, $topic-qast,
                 $!typematch-type, $!typematch-junction)
-            !! QAST::Op.new(
-                :op('callmethod'), :name('ACCEPTS'),
-                $!condition.IMPL-TO-QAST($context),
-                $topic-qast
-            );
+            !! $!litmatch
+                ?? self.IMPL-LITMATCH-QAST($context, $topic-qast, $!litmatch-data, 0)
+                !! QAST::Op.new(
+                    :op('callmethod'), :name('ACCEPTS'),
+                    $!condition.IMPL-TO-QAST($context),
+                    $topic-qast
+                );
         QAST::Op.new(
             :op('if'),
             $sm-qast,

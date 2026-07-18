@@ -709,6 +709,10 @@ class RakuAST::Node {
         }
 
         if $result =:= $expr {
+            $result := self.IMPL-COLLAPSE-LITMATCH($resolver, $expr);
+        }
+
+        if $result =:= $expr {
             $result := self.IMPL-REWRITE-SQUARE($resolver, $expr);
         }
 
@@ -1434,6 +1438,174 @@ class RakuAST::Node {
     # match qualifies: a link of a longer comparison chain must stay a chain
     # op. The soft pragma turns the reduction off, since it bypasses the
     # operator and ACCEPTS routines that wrapping relies on.
+    # The pieces a literal matcher's smartmatch reduces to, or null when
+    # the matcher is anything else: the literal's value, the setting
+    # comparison the reduced match runs, the Junction and Nil types the
+    # emission guards with, and whether the comparison is by string. Only
+    # an int, num, or str literal qualifies, since the reduction leans on
+    # what the value's own ACCEPTS comes down to: numeric equality over
+    # the topic's Numeric, or string equality over its Stringy. A NaN or
+    # infinite literal compares by identity instead, and a user ACCEPTS
+    # candidate that could take a concrete matcher keeps the dispatch.
+    method IMPL-LITMATCH-DATA(RakuAST::Resolver $resolver, Mu $matcher) {
+        CATCH {
+            return nqp::null();
+        }
+        my int $string := 0;
+        if nqp::istype($matcher, RakuAST::StrLiteral) {
+            $string := 1;
+        }
+        elsif nqp::istype($matcher, RakuAST::IntLiteral) {
+        }
+        elsif nqp::istype($matcher, RakuAST::NumLiteral) {
+            return nqp::null()
+                if nqp::isnanorinf(nqp::unbox_n($matcher.value));
+        }
+        else {
+            return nqp::null();
+        }
+        my $value := $matcher.maybe-compile-time-value;
+        return nqp::null() unless nqp::isconcrete($value);
+        my $accepts := nqp::tryfindmethod($value.WHAT, 'ACCEPTS');
+        return nqp::null() unless nqp::isconcrete($accepts)
+            && nqp::can($accepts, 'IS-SETTING-ONLY')
+            && nqp::istrue($accepts.IS-SETTING-ONLY(
+                nqp::const::SIG_ELEM_UNDEFINED_ONLY));
+        my $eq-name := RakuAST::Name.from-identifier(
+            $string ?? '&infix:<eq>' !! '&infix:<==>');
+        my $eq-res := $resolver.resolve-name-constant-in-setting($eq-name);
+        return nqp::null() unless nqp::isconcrete($eq-res);
+        my $eq := $eq-res.compile-time-value;
+        return nqp::null() unless nqp::isconcrete($eq);
+        my $Junction := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Junction');
+        my $Nil      := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Nil');
+        return nqp::null() if nqp::isnull($Junction) || nqp::isnull($Nil);
+        [$value, $eq, $Junction, $Nil, $string]
+    }
+
+    # A smartmatch against a literal comes down to an equality check. A
+    # known topic decides the match now through the literal's own ACCEPTS.
+    # Otherwise the reduced comparison is marked for code generation.
+    method IMPL-COLLAPSE-LITMATCH(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return $expr;
+        }
+
+        return $expr unless nqp::istype($expr, RakuAST::ApplyInfix);
+        my $infix := $expr.infix;
+        return $expr unless nqp::istype($infix, RakuAST::Infix)
+            && $infix.is-resolved;
+        my str $op := $infix.operator;
+        my int $negated := $op eq '!~~';
+        return $expr unless $negated || $op eq '~~';
+        my $left := $expr.left;
+        return $expr if nqp::istype($left, RakuAST::ApplyInfix)
+            && nqp::istype($left.infix, RakuAST::Infix)
+            && $left.infix.properties.chain;
+        return $expr if nqp::istype(self, RakuAST::ApplyInfix)
+            && nqp::istype(self.infix, RakuAST::Infix)
+            && self.infix.properties.chain
+            && nqp::eqaddr(self.left, $expr);
+        return $expr unless nqp::istype($expr.right, RakuAST::Literal);
+        return $expr unless self.IMPL-OPERATOR-IS-CORE($resolver, $infix);
+        return $expr if self.IMPL-IN-SOFT-SCOPE($resolver);
+        return $expr if nqp::objprimspec($left.return-type);
+
+        # Both sides known decides the match now, through the literal's
+        # own ACCEPTS in case the equality it comes down to throws.
+        my $right := $expr.right;
+        if $left.has-compile-time-value
+            && self.IMPL-FOLDABLE-OPERAND($left)
+            && self.IMPL-DROPPABLE($left) && self.IMPL-DROPPABLE($right) {
+            my $matcher-value := $right.maybe-compile-time-value;
+            my $topic-value := $left.maybe-compile-time-value;
+            my $accepts := nqp::tryfindmethod($matcher-value.WHAT, 'ACCEPTS');
+            if nqp::isconcrete($accepts)
+                && nqp::can($accepts, 'IS-SETTING-ONLY')
+                && nqp::istrue($accepts.IS-SETTING-ONLY(
+                    nqp::const::SIG_ELEM_UNDEFINED_ONLY))
+                && nqp::can($topic-value.HOW, 'archetypes')
+                && !$topic-value.HOW.archetypes($topic-value).generic {
+                my $matched := nqp::null();
+                try {
+                    $matched := $matcher-value.ACCEPTS($topic-value);
+                    $matched := $negated ?? $matched.not !! $matched.Bool;
+                }
+                return RakuAST::Literal.from-value($matched)
+                    unless nqp::isnull($matched);
+            }
+        }
+
+        my $data := self.IMPL-LITMATCH-DATA($resolver, $right);
+        return $expr if nqp::isnull($data);
+        $infix.IMPL-SET-LITMATCH($data);
+        $expr
+    }
+
+    # A reduced literal match: the topic, bound to a local so the guards
+    # and the comparison evaluate it once, compared against the literal.
+    # A numeric comparison coerces the topic the way the literal's ACCEPTS
+    # would, with a failed coercion becoming NaN, which no number equals.
+    # An undefined topic answers without comparing, since the coercions
+    # would warn on it, and a topic that turns out to be a concrete
+    # Junction autothreads over the literal's ACCEPTS instead.
+    method IMPL-LITMATCH-QAST(RakuAST::IMPL::QASTContext $context, Mu $topic-qast, Mu @data, int $negated) {
+        my $value    := @data[0];
+        my $eq       := @data[1];
+        my $junction := @data[2];
+        my $nil      := @data[3];
+        my int $string := @data[4];
+        $context.ensure-sc($value);
+        $context.ensure-sc($eq);
+        $context.ensure-sc($junction);
+        my $neg-bool := nqp::hllboolfor($negated ?? 1 !! 0, 'Raku');
+        $context.ensure-sc($neg-bool);
+        my str $tmp := QAST::Node.unique('litmatch_topic');
+        my $topic := QAST::Var.new( :name($tmp), :scope<local> );
+        my $coerced;
+        if $string {
+            $coerced := QAST::Op.new( :op<callmethod>, :name<Stringy>, $topic );
+        }
+        else {
+            $context.ensure-sc($nil);
+            my $fail-or-nil := QAST::Op.new( :op<hllbool>, QAST::IVal.new( :value(1) ) );
+            $fail-or-nil.named('fail-or-nil');
+            my str $ntmp := QAST::Node.unique('litmatch_numeric');
+            $coerced := QAST::Stmts.new(
+                QAST::Op.new( :op<bind>,
+                    QAST::Var.new( :name($ntmp), :scope<local>, :decl<var> ),
+                    QAST::Op.new( :op<callmethod>, :name<Numeric>, $topic, $fail-or-nil )),
+                QAST::Op.new( :op<if>,
+                    QAST::Op.new( :op<istype>,
+                        QAST::Var.new( :name($ntmp), :scope<local> ),
+                        QAST::WVal.new( :value($nil) )),
+                    QAST::NVal.new( :value(nqp::nan()) ),
+                    QAST::Var.new( :name($ntmp), :scope<local> )));
+        }
+        my $cmp := QAST::Op.new( :op<call>,
+            QAST::WVal.new( :value($eq) ),
+            QAST::WVal.new( :value($value) ),
+            $coerced);
+        $cmp := QAST::Op.new( :op<callmethod>, :name<not>, $cmp ) if $negated;
+        QAST::Stmts.new(
+            QAST::Op.new( :op<bind>,
+                QAST::Var.new( :name($tmp), :scope<local>, :decl<var> ),
+                $topic-qast),
+            QAST::Op.new( :op<if>,
+                QAST::Op.new( :op<if>,
+                    QAST::Op.new( :op<istype>, $topic,
+                        QAST::WVal.new( :value($junction) ) ),
+                    QAST::Op.new( :op<isconcrete>, $topic )),
+                QAST::Op.new( :op<callmethod>, :name<BOOLIFY-ACCEPTS>,
+                    $topic,
+                    QAST::WVal.new( :value($value) ),
+                    QAST::WVal.new( :value($neg-bool) )),
+                QAST::Op.new( :op<if>,
+                    QAST::Op.new( :op<isconcrete>, $topic ),
+                    $cmp,
+                    QAST::WVal.new( :value($neg-bool) ))))
+    }
+
     # The compile-time type object a matcher node reduces to a type check
     # against, or null when it is anything else: the matcher must carry a
     # compile-time type-object value, non-generic, whose ACCEPTS no user
@@ -1481,7 +1653,13 @@ class RakuAST::Node {
             ?? $when.condition
             !! $when.expression;
         my $type := self.IMPL-TYPEMATCH-MATCHER-TYPE($matcher);
-        return Nil if nqp::isnull($type);
+        if nqp::isnull($type) {
+            if nqp::istype($matcher, RakuAST::Literal) {
+                my $data := self.IMPL-LITMATCH-DATA($resolver, $matcher);
+                $when.IMPL-SET-LITMATCH($data) unless nqp::isnull($data);
+            }
+            return Nil;
+        }
         my $Junction := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver, 'Junction');
         return Nil if nqp::isnull($Junction);
         $when.IMPL-SET-TYPEMATCH($type,

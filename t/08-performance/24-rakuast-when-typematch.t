@@ -22,9 +22,9 @@ if nqp::ifnull(nqp::gethllsym('Raku', 'COMPILER-FRONTEND'), '') eq 'rakuast' {
         qast-contains-callmethod(v, 'ACCEPTS')
     }, 'a matcher with a user ACCEPTS keeps the dispatch';
 
-    qast-is 'given 42 { when 5 { say 1 } }', :full, -> \v {
+    qast-is 'my $m = 5; given 42 { when $m { say 1 } }', :full, -> \v {
         qast-contains-callmethod(v, 'ACCEPTS')
-    }, 'a literal matcher is not a type object and keeps the dispatch';
+    }, 'a matcher that is not known at compile time keeps the dispatch';
 
     qast-is '$_ = 42; say "x" when Int', :full, -> \v {
         qast-contains-op(v, 'istype')

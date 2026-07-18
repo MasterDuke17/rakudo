@@ -102,6 +102,16 @@ class RakuAST::StatementModifier::When
         nqp::bindattr(self, RakuAST::StatementModifier::When, '$!typematch-junction', $junction);
     }
 
+    # Set by the optimize pass when the matcher reduces to a literal
+    # comparison against the topic.
+    has int $!litmatch;
+    has Mu $!litmatch-data;
+
+    method IMPL-SET-LITMATCH(Mu $data) {
+        nqp::bindattr_i(self, RakuAST::StatementModifier::When, '$!litmatch', 1);
+        nqp::bindattr(self, RakuAST::StatementModifier::When, '$!litmatch-data', $data);
+    }
+
     method IMPL-WRAP-QAST(RakuAST::IMPL::QASTContext $context, Mu $statement-qast) {
         QAST::Op.new(
             :op('if'),
@@ -109,11 +119,15 @@ class RakuAST::StatementModifier::When
                 ?? self.IMPL-WHEN-TYPEMATCH-QAST($context,
                     QAST::Var.new( :name('$_'), :scope('lexical') ),
                     $!typematch-type, $!typematch-junction)
-                !! QAST::Op.new(
-                    :op('callmethod'), :name('ACCEPTS'),
-                    self.expression.IMPL-TO-QAST($context),
-                    QAST::Var.new( :name('$_'), :scope('lexical') )
-                ),
+                !! $!litmatch
+                    ?? self.IMPL-LITMATCH-QAST($context,
+                        QAST::Var.new( :name('$_'), :scope('lexical') ),
+                        $!litmatch-data, 0)
+                    !! QAST::Op.new(
+                        :op('callmethod'), :name('ACCEPTS'),
+                        self.expression.IMPL-TO-QAST($context),
+                        QAST::Var.new( :name('$_'), :scope('lexical') )
+                    ),
             $statement-qast,
             self.IMPL-EMPTY($context)
         )

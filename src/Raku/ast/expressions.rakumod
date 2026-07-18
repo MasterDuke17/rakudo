@@ -506,6 +506,16 @@ class RakuAST::Infix
         nqp::bindattr(self, RakuAST::Infix, '$!ct-inline-candidate', nqp::null())
     }
 
+    # Set by the optimize pass when this smartmatch reduces to a literal
+    # comparison: the literal, the setting comparison, and the guard types.
+    has int $!litmatch;
+    has Mu $!litmatch-data;
+
+    method IMPL-SET-LITMATCH(Mu $data) {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!litmatch', 1);
+        nqp::bindattr(self, RakuAST::Infix, '$!litmatch-data', $data);
+    }
+
     # Set by the optimize pass on the assignment of a comma list to a plain
     # array variable, for lowering to a direct build of the list internals.
     has int $!lowered-array-init;
@@ -572,6 +582,8 @@ class RakuAST::Infix
                               Mu $right-qast
     ) {
         return self.IMPL-TYPEMATCH-QAST($context, $left-qast) if $!typematch;
+        return self.IMPL-LITMATCH-QAST($context, $left-qast, $!litmatch-data,
+            $!operator eq '!~~' ?? 1 !! 0) if $!litmatch;
 
         # Operators that map directly into a QAST op
         my constant QAST-OP := nqp::hash(
