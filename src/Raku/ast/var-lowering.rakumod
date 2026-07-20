@@ -15,10 +15,13 @@ class RakuAST::IMPL::VarLoweringFrame {
     has Mu $!candidate-ids;
     has Mu $!candidate-names;
     has Mu $!implicit-ids;
+    has Mu $!implicit-names;
     has int $!implicit-used;
     has int $!flatten-candidate;
+    has int $!flatten-arg;
     has int $!flatten-blocked;
     has Mu $!deferred-uses;
+    has str $!implicit-slurpy-id;
 
     method new(RakuAST::Node $node, int $is-scope) {
         my $obj := nqp::create(self);
@@ -28,6 +31,7 @@ class RakuAST::IMPL::VarLoweringFrame {
         nqp::bindattr($obj, RakuAST::IMPL::VarLoweringFrame, '$!candidate-ids', nqp::hash());
         nqp::bindattr($obj, RakuAST::IMPL::VarLoweringFrame, '$!candidate-names', nqp::hash());
         nqp::bindattr($obj, RakuAST::IMPL::VarLoweringFrame, '$!implicit-ids', nqp::hash());
+        nqp::bindattr($obj, RakuAST::IMPL::VarLoweringFrame, '$!implicit-names', nqp::hash());
         nqp::bindattr($obj, RakuAST::IMPL::VarLoweringFrame, '$!deferred-uses', []);
         $obj
     }
@@ -40,12 +44,17 @@ class RakuAST::IMPL::VarLoweringFrame {
     }
     method is-poisoned() { $!poisoned }
 
-    method register-implicit(str $id) {
-        nqp::bindkey($!implicit-ids, $id, 1);
+    method register-implicit(str $id, Mu $decl) {
+        my $record := nqp::hash('decl', $decl);
+        nqp::bindkey($!implicit-ids, $id, $record);
+        nqp::bindkey($!implicit-names, $decl.lexical-name, $record);
         Nil
     }
-    method is-implicit(str $id) { nqp::existskey($!implicit-ids, $id) }
-    method mark-implicit-used() {
+    method implicit-record-for-id(str $id) { nqp::atkey($!implicit-ids, $id) }
+    method implicit-record-for-name(str $name) { nqp::atkey($!implicit-names, $name) }
+    method implicit-records() { $!implicit-ids }
+    method mark-implicit-used(Mu $record) {
+        nqp::bindkey($record, 'used', 1);
         nqp::bindattr_i(self, RakuAST::IMPL::VarLoweringFrame, '$!implicit-used', 1);
         Nil
     }
@@ -55,12 +64,23 @@ class RakuAST::IMPL::VarLoweringFrame {
         nqp::bindattr_i(self, RakuAST::IMPL::VarLoweringFrame, '$!flatten-candidate', 1);
         Nil
     }
+    method mark-flatten-arg() {
+        nqp::bindattr_i(self, RakuAST::IMPL::VarLoweringFrame, '$!flatten-arg', 1);
+        Nil
+    }
+    method flatten-arg() { $!flatten-arg }
     method is-flatten-candidate() { $!flatten-candidate }
     method block-flatten() {
         nqp::bindattr_i(self, RakuAST::IMPL::VarLoweringFrame, '$!flatten-blocked', 1);
         Nil
     }
     method flatten-blocked() { $!flatten-blocked }
+
+    method set-implicit-slurpy-id(str $id) {
+        nqp::bindattr_s(self, RakuAST::IMPL::VarLoweringFrame, '$!implicit-slurpy-id', $id);
+        Nil
+    }
+    method implicit-slurpy-id() { $!implicit-slurpy-id }
 
     method add-deferred(str $id) {
         nqp::push($!deferred-uses, $id);
@@ -108,6 +128,7 @@ class RakuAST::IMPL::VarLowering {
     has Mu $!sentinel;
     has int $!debug;
     has int $!begin-context;
+    has int $!topic-not-dynamic;
 
     method analyze-compunit(RakuAST::CompUnit $compunit, RakuAST::Resolver $resolver, :$interactive?) {
         # Escape hatch while the lowering is young: skip the analysis
@@ -118,6 +139,10 @@ class RakuAST::IMPL::VarLowering {
         nqp::bindattr($analyzer, RakuAST::IMPL::VarLowering, '$!frames', []);
         nqp::bindattr_i($analyzer, RakuAST::IMPL::VarLowering, '$!debug',
             nqp::atkey(nqp::getenvhash(), 'RAKUDO_LOWERING_DEBUG') ?? 1 !! 0);
+        # From 6.d the topic is not a dynamic variable, so a callee
+        # cannot reach an unused one and its declaration can go.
+        nqp::bindattr_i($analyzer, RakuAST::IMPL::VarLowering, '$!topic-not-dynamic',
+            nqp::getcomp('Raku').language_revision >= 2 ?? 1 !! 0);
 
         # The sentinel type that stands in for a lowered lexical's
         # by-name symbol. Without it (very early bootstrap) nothing is
@@ -150,6 +175,7 @@ class RakuAST::IMPL::VarLowering {
     }
 
     method IMPL-WALK(RakuAST::Node $node) {
+        self.IMPL-CHECK-NAME-REACHERS($node);
         self.IMPL-CHECK-FLATTEN-BLOCKERS($node);
 
         # Trait arguments, type parameterizations, and constant
@@ -218,12 +244,73 @@ class RakuAST::IMPL::VarLowering {
             return Nil;
         }
 
+        # A sunk serial for statement drives its body directly, and a
+        # given calls its body with the topicalized value, so both walk
+        # their bodies as argument-taking flatten candidates: a plain
+        # body flattens when its topic goes unused, and a pointy body
+        # with one plain parameter has the iteration value bound to the
+        # parameter's local instead.
+        if nqp::istype($node, RakuAST::Statement::For)
+            && $node.mode eq 'serial'
+            && $node.IMPL-DISCARD-RESULT
+            && !nqp::isconcrete($node.otherwise)
+            && $node.IMPL-CAN-USE-STATEMENT-FORM($node.body) {
+            self.IMPL-REGISTER-IMPLICIT-LOOKUPS($node);
+            self.IMPL-WALK($node.source);
+            self.IMPL-WALK-FLATTEN-CANDIDATE($node.body, :arg);
+            $node.visit-labels(-> $label { self.IMPL-WALK($label) });
+            return Nil;
+        }
+        if nqp::istype($node, RakuAST::Statement::Given) {
+            self.IMPL-REGISTER-IMPLICIT-LOOKUPS($node);
+            self.IMPL-WALK($node.source);
+            self.IMPL-WALK-FLATTEN-CANDIDATE($node.body, :arg);
+            $node.visit-labels(-> $label { self.IMPL-WALK($label) });
+            return Nil;
+        }
+
+        # A bare block statement is called where it stands, so it
+        # flattens under the same rules as a loop body. A loop modifier
+        # keeps the block a per-iteration frame, and a topicalizing
+        # condition modifier passes the block an argument.
+        if nqp::istype($node, RakuAST::Statement::Expression)
+            && !nqp::isconcrete($node.loop-modifier) {
+            my $expression := $node.expression;
+            my $cond := $node.condition-modifier;
+            if nqp::eqaddr($expression.WHAT, RakuAST::Block)
+                && $expression.bare-block
+                && (!nqp::isconcrete($cond)
+                    || nqp::istype($cond, RakuAST::StatementModifier::If)
+                    || nqp::istype($cond, RakuAST::StatementModifier::Unless)) {
+                self.IMPL-REGISTER-IMPLICIT-LOOKUPS($node);
+                self.IMPL-WALK($cond) if nqp::isconcrete($cond);
+                self.IMPL-WALK-FLATTEN-CANDIDATE($expression);
+                $node.visit-labels(-> $label { self.IMPL-WALK($label) });
+                return Nil;
+            }
+        }
+
         # A variable declaration belongs to the enclosing scope's frame,
         # not to any frame the node itself creates. A parameter's uses
         # resolve to the target node while emission delegates to the
         # declaration it wraps, so the target registers the declaration
         # under both identities, and the wrapped declaration itself is
         # skipped when the walk reaches it as a child.
+        # A %_ appearing in a method body is a slurpy hash placeholder
+        # node rather than a variable lookup, and it is what makes the
+        # signature's implicit slurpy hash matter.
+        if nqp::istype($node, RakuAST::VarDeclaration::Placeholder::SlurpyHash) {
+            my int $i := nqp::elems($!frames);
+            while --$i >= 0 {
+                my $frame := nqp::atpos($!frames, $i);
+                if $frame.implicit-slurpy-id {
+                    my $record := $frame.record-for-id($frame.implicit-slurpy-id);
+                    nqp::bindkey($record, 'used', 1) unless nqp::isnull($record);
+                    last;
+                }
+            }
+        }
+
         if nqp::istype($node, RakuAST::ParameterTarget::Var) {
             my $decl := $node.declaration;
             self.IMPL-REGISTER-DECL($decl, ~nqp::objectid($node))
@@ -325,8 +412,19 @@ class RakuAST::IMPL::VarLowering {
         # identities decide whether the implicits go unused.
         if $is-scope && nqp::istype($node, RakuAST::ImplicitDeclarations) {
             for $node.IMPL-UNWRAP-LIST($node.get-implicit-declarations()) {
-                $frame.register-implicit(~nqp::objectid($_));
+                $frame.register-implicit(~nqp::objectid($_), $_)
+                    if nqp::istype($_, RakuAST::VarDeclaration::Implicit);
             }
+        }
+        if $is-scope && nqp::istype($node, RakuAST::Routine)
+            && nqp::isconcrete($node.signature) {
+            my $slurpy := nqp::getattr($node.signature, RakuAST::Signature,
+                '$!implicit-slurpy-hash');
+            $frame.set-implicit-slurpy-id(
+                ~nqp::objectid($slurpy.target.declaration))
+                if nqp::isconcrete($slurpy)
+                && nqp::isconcrete($slurpy.target)
+                && nqp::isconcrete($slurpy.target.declaration);
         }
         $frame
     }
@@ -335,8 +433,10 @@ class RakuAST::IMPL::VarLowering {
         my $frame := nqp::pop($!frames);
         if $frame.is-scope {
             self.IMPL-DECIDE($frame);
+            my int $flattened;
             if $frame.is-flatten-candidate {
                 my int $approved := self.IMPL-FLATTEN-VERDICT($frame);
+                $flattened := $approved;
                 if $approved {
                     $frame.node.IMPL-SET-FLATTEN-APPROVED();
                     if $!debug {
@@ -360,6 +460,60 @@ class RakuAST::IMPL::VarLowering {
                         ?? self.IMPL-REGISTER-USE-ID($id)
                         !! self.IMPL-MARK-CAPTURED-ID($id);
                 }
+            }
+            self.IMPL-DECIDE-IMPLICITS($frame) unless $flattened;
+        }
+        Nil
+    }
+
+    # An unused implicit whose declaring scope nothing reaches by name
+    # need not be set up at all. The topic only goes from 6.d, where it
+    # is not dynamic, so a callee cannot reach it either. A kept topic
+    # that aliases the enclosing one still emits its getlexouter, which
+    # is a by-name use of the enclosing topic, so elimination cascades
+    # outward only through scopes whose own topic went unused.
+    method IMPL-DECIDE-IMPLICITS(Mu $frame) {
+        my int $poisoned := $frame.is-poisoned;
+        my str $slurpy-id := $frame.implicit-slurpy-id;
+        if $slurpy-id && !$poisoned {
+            my $record := $frame.record-for-id($slurpy-id);
+            nqp::atkey($record, 'decl').IMPL-SET-UNUSED-SLURPY()
+                unless nqp::isnull($record) || nqp::existskey($record, 'used');
+        }
+        my $it := nqp::iterator($frame.implicit-records);
+        while $it {
+            my $record := nqp::iterval(nqp::shift($it));
+            my $decl := nqp::atkey($record, 'decl');
+            my int $used := nqp::existskey($record, 'used');
+            if nqp::istype($decl, RakuAST::VarDeclaration::Implicit::BlockTopic) {
+                if $decl.exception {
+                    self.IMPL-MARK-MAGICAL-USED('$!');
+                }
+                elsif $decl.parameter {
+                    # A parameter-form topic cannot go: without its param
+                    # declaration the block would no longer accept the
+                    # argument its callers pass. Only a non-required
+                    # parameter defaults from the enclosing topic.
+                    self.IMPL-MARK-MAGICAL-USED('$_') unless $decl.required;
+                }
+                elsif !$used && !$poisoned && $!topic-not-dynamic {
+                    # A non-parameter topic binds from the enclosing one
+                    # whether or not it is marked required, so an unused
+                    # one is dropped whole.
+                    $decl.IMPL-SET-UNUSED();
+                }
+                else {
+                    # And a kept one reads the enclosing topic by name.
+                    self.IMPL-MARK-MAGICAL-USED('$_');
+                }
+            }
+            elsif nqp::istype($decl, RakuAST::VarDeclaration::Implicit::Special) {
+                $decl.IMPL-SET-UNUSED()
+                    if $decl.name eq '$_'
+                    && !$used && !$poisoned && $!topic-not-dynamic;
+            }
+            elsif nqp::istype($decl, RakuAST::VarDeclaration::Implicit::Cursor) {
+                $decl.IMPL-SET-UNUSED() if !$used && !$poisoned;
             }
         }
         Nil
@@ -387,9 +541,14 @@ class RakuAST::IMPL::VarLowering {
                 && $_.IMPL-LOWERED-LOCAL-NAME {
             }
             else {
-                return 0 unless $frame.is-implicit(~nqp::objectid($_))
-                    && nqp::istype($_, RakuAST::VarDeclaration::Implicit::BlockTopic)
-                    && !$_.required && !$_.exception;
+                # Before 6.d the topic is dynamic, so a called routine can
+                # reach it by name with no use this analysis could see,
+                # and a body declaring one must stay a frame.
+                return 0 if nqp::isnull($frame.implicit-record-for-id(~nqp::objectid($_)))
+                    || !nqp::istype($_, RakuAST::VarDeclaration::Implicit::BlockTopic)
+                    || ($_.required && !$frame.flatten-arg)
+                    || !$!topic-not-dynamic
+                    || $_.exception;
             }
         }
         1
@@ -477,7 +636,7 @@ class RakuAST::IMPL::VarLowering {
     method IMPL-REGISTER-IMPLICIT-LOOKUPS(RakuAST::Node $node) {
         if nqp::istype($node, RakuAST::ImplicitLookups) {
             for $node.IMPL-UNWRAP-LIST($node.get-implicit-lookups()) {
-                self.IMPL-CHECK-FLATTEN-BLOCKERS($_);
+                self.IMPL-CHECK-NAME-REACHERS($_);
                 self.IMPL-REGISTER-USE($_)
                     if nqp::istype($_, RakuAST::Lookup) && $_.is-resolved;
             }
@@ -489,8 +648,12 @@ class RakuAST::IMPL::VarLowering {
     # its shape allows flattening at all: a plain block, no signature or
     # placeholders, no phasers. Everything else about eligibility is
     # decided from what the walk observes, when the frame pops.
-    method IMPL-WALK-FLATTEN-CANDIDATE(RakuAST::Node $body) {
-        unless nqp::eqaddr($body.WHAT, RakuAST::Block)
+    method IMPL-WALK-FLATTEN-CANDIDATE(RakuAST::Node $body, :$arg?) {
+        my int $shape-ok := nqp::eqaddr($body.WHAT, RakuAST::Block);
+        $shape-ok := 1 if $arg
+            && nqp::eqaddr($body.WHAT, RakuAST::PointyBlock)
+            && !nqp::isnull($body.IMPL-FLATTEN-ARG-DECLARATION);
+        unless $shape-ok
             && !nqp::isconcrete($body.placeholder-signature)
             && !$body.has-any-phasers {
             self.IMPL-WALK($body);
@@ -498,6 +661,7 @@ class RakuAST::IMPL::VarLowering {
         }
         my $frame := self.IMPL-ENTER($body, 1);
         $frame.mark-flatten-candidate();
+        $frame.mark-flatten-arg() if $arg;
         self.IMPL-REGISTER-IMPLICIT-LOOKUPS($body);
         $body.visit-children(-> $child { self.IMPL-WALK($child) });
         self.IMPL-LEAVE();
@@ -512,31 +676,7 @@ class RakuAST::IMPL::VarLowering {
         return Nil unless $n;
         my $top := nqp::atpos($!frames, $n - 1);
         return Nil unless $top.is-flatten-candidate && !$top.flatten-blocked;
-        if nqp::istype($node, RakuAST::Statement::When)
-            || nqp::istype($node, RakuAST::Statement::Default) {
-            $top.block-flatten();
-        }
-        elsif nqp::istype($node, RakuAST::Statement::Expression) {
-            my $cond := $node.condition-modifier;
-            my $loop := $node.loop-modifier;
-            $top.block-flatten()
-                if (nqp::isconcrete($cond)
-                    && !nqp::istype($cond, RakuAST::StatementModifier::If)
-                    && !nqp::istype($cond, RakuAST::StatementModifier::Unless))
-                || (nqp::isconcrete($loop)
-                    && !nqp::istype($loop, RakuAST::StatementModifier::WhileUntil));
-        }
-        elsif nqp::istype($node, RakuAST::ApplyInfix)
-            || nqp::istype($node, RakuAST::ApplyListInfix) {
-            my $infix := $node.infix;
-            if nqp::istype($infix, RakuAST::Infix) {
-                my str $op := $infix.operator;
-                $top.block-flatten()
-                    if $op eq '~~' || $op eq '!~~'
-                    || $op eq 'andthen' || $op eq 'orelse' || $op eq 'notandthen';
-            }
-        }
-        elsif nqp::istype($node, RakuAST::ApplyPrefix) {
+        if nqp::istype($node, RakuAST::ApplyPrefix) {
             # temp and let register their restore on the frame of the
             # code that runs them.
             my $prefix := $node.prefix;
@@ -565,15 +705,58 @@ class RakuAST::IMPL::VarLowering {
             # frame's caller, so removing the frame skips one link.
             $top.block-flatten();
         }
-        elsif nqp::istype($node, RakuAST::Var::Lexical) {
-            # A magical is emitted as a by-name lexical, so at run time
-            # it binds to the innermost declaration of that name even
-            # when its compile-time resolution points at an outer one.
-            # Using one in the body means the body's own magical, whose
-            # declaration flattening would remove.
+        Nil
+    }
+
+    # Reaching a magical by name, or running a construct that reads and
+    # writes the topic by name, counts as a use of the innermost
+    # declaration of that name: magicals are emitted as by-name
+    # lexicals, so at run time they bind innermost even when their
+    # compile-time resolution points at an outer declaration.
+    method IMPL-CHECK-NAME-REACHERS(RakuAST::Node $node) {
+        if nqp::istype($node, RakuAST::Var::Lexical) {
             my str $name := $node.name;
-            $top.block-flatten()
+            self.IMPL-MARK-MAGICAL-USED($name)
                 if $name eq '$_' || $name eq '$/' || $name eq '$!' || $name eq '$¢';
+        }
+        elsif nqp::istype($node, RakuAST::Statement::When)
+            || nqp::istype($node, RakuAST::Statement::Default) {
+            self.IMPL-MARK-MAGICAL-USED('$_');
+        }
+        elsif nqp::istype($node, RakuAST::Statement::Expression) {
+            my $cond := $node.condition-modifier;
+            my $loop := $node.loop-modifier;
+            self.IMPL-MARK-MAGICAL-USED('$_')
+                if (nqp::isconcrete($cond)
+                    && !nqp::istype($cond, RakuAST::StatementModifier::If)
+                    && !nqp::istype($cond, RakuAST::StatementModifier::Unless))
+                || (nqp::isconcrete($loop)
+                    && !nqp::istype($loop, RakuAST::StatementModifier::WhileUntil));
+        }
+        elsif nqp::istype($node, RakuAST::ApplyInfix)
+            || nqp::istype($node, RakuAST::ApplyListInfix) {
+            my $infix := $node.infix;
+            if nqp::istype($infix, RakuAST::Infix) {
+                my str $op := $infix.operator;
+                self.IMPL-MARK-MAGICAL-USED('$_')
+                    if $op eq '~~' || $op eq '!~~'
+                    || $op eq 'andthen' || $op eq 'orelse' || $op eq 'notandthen';
+            }
+        }
+        Nil
+    }
+
+    method IMPL-MARK-MAGICAL-USED(str $name) {
+        my int $i := nqp::elems($!frames);
+        while --$i >= 0 {
+            my $frame := nqp::atpos($!frames, $i);
+            if $frame.is-scope {
+                my $record := $frame.implicit-record-for-name($name);
+                unless nqp::isnull($record) {
+                    $frame.mark-implicit-used($record);
+                    return Nil;
+                }
+            }
         }
         Nil
     }
@@ -601,6 +784,7 @@ class RakuAST::IMPL::VarLowering {
             my $frame := nqp::atpos($!frames, $i);
             my $record := $frame.record-for-id($id);
             unless nqp::isnull($record) {
+                nqp::bindkey($record, 'used', 1);
                 if $!begin-context {
                     nqp::bindkey($record, 'captured', 1);
                 }
@@ -620,8 +804,9 @@ class RakuAST::IMPL::VarLowering {
                 }
                 return Nil;
             }
-            if $frame.is-implicit($id) {
-                $frame.mark-implicit-used();
+            my $implicit := $frame.implicit-record-for-id($id);
+            unless nqp::isnull($implicit) {
+                $frame.mark-implicit-used($implicit);
                 return Nil;
             }
         }

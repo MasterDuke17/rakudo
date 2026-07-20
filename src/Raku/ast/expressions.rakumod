@@ -493,6 +493,19 @@ class RakuAST::Infix
         nqp::bindattr_i(self, RakuAST::Infix, '$!chainstatic', 1)
     }
 
+    # Set by the optimize pass when the operand types decide the dispatch at
+    # compile time: the routine, for a multi the chosen candidate, whose
+    # inline info, when it has any, is spliced in place of the operator call.
+    has Mu $!ct-inline-candidate;
+
+    method IMPL-SET-CT-INLINE-CANDIDATE(Mu $routine) {
+        nqp::bindattr(self, RakuAST::Infix, '$!ct-inline-candidate', $routine)
+    }
+
+    method IMPL-CLEAR-CT-INLINE-CANDIDATE() {
+        nqp::bindattr(self, RakuAST::Infix, '$!ct-inline-candidate', nqp::null())
+    }
+
     # Set by the optimize pass on the assignment of a comma list to a plain
     # array variable, for lowering to a direct build of the list internals.
     has int $!lowered-array-init;
@@ -579,19 +592,31 @@ class RakuAST::Infix
             $name := '&infix' ~ RakuAST::Resolver.IMPL-CANONICALIZE-PAIR($!operator);
         }
 
-        (my str $op := QAST-OP{$!operator})
-          # Directly mapping
-          ?? QAST::Op.new(:$op, $left-qast, $right-qast)
-          # Otherwise, it's called by finding the lexical sub to call, and
-          # compiling it as chaining if required.
-          !! self.IMPL-SIMPLIFY-REF-ARGS(QAST::Op.new(
-               :op(self.properties.chain
-                     ?? ($!chainstatic ?? 'chainstatic' !! 'chain')
-                     !! 'call'),
-               :$name,
-               $left-qast,
-               $right-qast
-             ))
+        # Directly mapping
+        my str $op := QAST-OP{$!operator};
+        if $op {
+            return QAST::Op.new(:$op, $left-qast, $right-qast);
+        }
+
+        # A compile-time-decided dispatch to a routine with inline info
+        # stands in for the call. A single-link chain compiles the same as
+        # a call, so the inlined body serves either form.
+        if nqp::isconcrete($!ct-inline-candidate) {
+            my $inlined := self.IMPL-CT-INLINE-QAST(
+                $context, $!ct-inline-candidate, [$left-qast, $right-qast]);
+            return $inlined unless nqp::isnull($inlined);
+        }
+
+        # Otherwise, it's called by finding the lexical sub to call, and
+        # compiling it as chaining if required.
+        self.IMPL-SIMPLIFY-REF-ARGS(QAST::Op.new(
+            :op(self.properties.chain
+                  ?? ($!chainstatic ?? 'chainstatic' !! 'chain')
+                  !! 'call'),
+            :$name,
+            $left-qast,
+            $right-qast
+        ))
     }
 
     method IMPL-ASSIGN-OP(QAST::Node $lhs_ast, QAST::Node $rhs_ast) {
@@ -3981,7 +4006,9 @@ class RakuAST::Statement::For
             && self.IMPL-CAN-USE-STATEMENT-FORM($!body) {
             my @lookups := self.IMPL-UNWRAP-LIST(self.get-implicit-lookups);
             my $Nil := @lookups[1].resolution.compile-time-value;
-            my $body-qast := $!body.IMPL-TO-QAST($context);
+            my int $flatten := $!body.IMPL-FLATTEN-APPROVED;
+            my $flatten-body := $flatten ?? $!body !! Mu;
+            my $body-qast := $flatten ?? Mu !! $!body.IMPL-TO-QAST($context);
 
             # An integer-range source the optimize pass approved becomes a
             # native counting loop, unless a bound turns out not to be a
@@ -3990,7 +4017,7 @@ class RakuAST::Statement::For
                 && nqp::elems(@labels) == 0
                 && !$!body.has-any-phasers {
                 my $range-qast := self.IMPL-TO-QAST-RANGE(
-                    $context, $!source, $body-qast, $Nil);
+                    $context, $!source, $body-qast, $Nil, :flatten-body($flatten-body));
                 return $range-qast unless $range-qast =:= Mu;
             }
 
@@ -4000,7 +4027,8 @@ class RakuAST::Statement::For
               $body-qast,
               @labels ?? @labels[0] !! RakuAST::Label,
               @lookups[0].resolution.compile-time-value,
-              $Nil
+              $Nil,
+              :flatten-body($flatten-body)
             );
         }
 

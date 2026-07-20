@@ -1470,6 +1470,45 @@ class RakuAST::Block
 
     method IMPL-FLATTEN-APPROVED() { $!flatten-approved }
 
+    # The declaration receiving a flattened invocation's argument. A
+    # plain block has none: its topic is only eligible for flattening
+    # when unused, so the argument is discarded.
+    method IMPL-FLATTEN-ARG-DECLARATION() { nqp::null }
+
+    # As IMPL-QAST-FLATTENED, but binding the given argument QAST into
+    # the block's argument declaration, the way calling the block with
+    # one positional would have.
+    method IMPL-QAST-FLATTENED-WITH-ARG(RakuAST::IMPL::QASTContext $context, Mu $arg-qast) {
+        my $arg-decl := self.IMPL-FLATTEN-ARG-DECLARATION;
+        my $stmts := QAST::Stmts.new();
+        for self.IMPL-UNWRAP-LIST(self.ast-lexical-declarations()) {
+            if nqp::istype($_, RakuAST::VarDeclaration::Simple)
+                && $_.IMPL-LOWERED-LOCAL-NAME {
+                if !nqp::isnull($arg-decl) && nqp::eqaddr($_, $arg-decl) {
+                    my str $local-name := $_.IMPL-LOWERED-LOCAL-NAME;
+                    $stmts.push(QAST::Var.new(
+                        :scope('local'), :decl('var'), :name($local-name) ));
+                    # hllize as the parameter binder would have, since
+                    # an iterator driven from nqp-side code can hand out
+                    # unboxed values.
+                    $stmts.push(QAST::Op.new(
+                        :op('bind'),
+                        QAST::Var.new( :name($local-name), :scope('local') ),
+                        QAST::Op.new( :op('hllize'),
+                            QAST::Op.new( :op('decont'), $arg-qast ) )
+                    ));
+                }
+                else {
+                    $stmts.push($_.IMPL-QAST-DECL-FLATTENED($context));
+                }
+            }
+        }
+        my $nested-blocks := self.IMPL-QAST-NESTED-BLOCK-DECLS($context);
+        $stmts.push($nested-blocks) if nqp::elems($nested-blocks.list);
+        $stmts.push($!body.IMPL-TO-QAST($context));
+        $stmts
+    }
+
     # The body emitted for inlining into the frame of the block's user:
     # declarations of nested code objects, the lowered locals with a
     # fresh container clone on every entry (a per-iteration frame would
@@ -1713,6 +1752,7 @@ class RakuAST::Block
             :$blocktype,
             self.IMPL-QAST-DECLS($context)
         );
+        self.IMPL-ADD-LOWERED-DEBUG-MAPPINGS($block);
 
         # Compile body and, if needed, a signature, and set up arity and any
         # exception rethrow logic.
@@ -1756,6 +1796,11 @@ class RakuAST::Block
             $block
         }
         else {
+            # A frame-independent bare block statement runs inline, with
+            # no closure clone and no call.
+            return self.IMPL-QAST-FLATTENED($context)
+                if self.bare-block && self.IMPL-FLATTEN-APPROVED;
+
             # Not immediate, so already produced as a declaration above; just
             # closure clone it. Only invoke if it's a bare block.
             # Ensure the block is linked when our outer block gets cloned before
@@ -1797,6 +1842,33 @@ class RakuAST::PointyBlock
   is RakuAST::Doc::DeclaratorTarget
 {
     has RakuAST::Signature $.signature;
+
+    # The single plain positional parameter, when the signature is
+    # simple enough that binding a flattened invocation's argument to
+    # the parameter's local matches what the call would have done: no
+    # type to check, no default, no where, no adverbs, no traits.
+    method IMPL-FLATTEN-ARG-DECLARATION() {
+        my @params := self.IMPL-UNWRAP-LIST($!signature.parameters);
+        return nqp::null unless nqp::elems(@params) == 1;
+        my $param := @params[0];
+        return nqp::null if nqp::isconcrete($param.type)
+            || nqp::isconcrete($param.default)
+            || nqp::isconcrete($param.where)
+            || nqp::isconcrete($param.array-shape)
+            || nqp::isconcrete($param.sub-signature)
+            || $param.optional
+            || $param.invocant
+            || $param.default-rw
+            || $param.default-raw
+            || !($param.slurpy =:= RakuAST::Parameter::Slurpy)
+            || nqp::elems($param.IMPL-UNWRAP-LIST($param.names))
+            || nqp::elems($param.IMPL-UNWRAP-LIST($param.traits));
+        my $target := $param.target;
+        return nqp::null unless nqp::istype($target, RakuAST::ParameterTarget::Var)
+            && nqp::isconcrete($target.declaration)
+            && !nqp::elems($target.declaration.IMPL-UNWRAP-LIST($target.declaration.traits));
+        $target.declaration
+    }
 
     method new(RakuAST::Signature :$signature,
                 RakuAST::Blockoid :$body,
@@ -1950,6 +2022,13 @@ class RakuAST::Routine
     has Bool $!replace-stub;
     has Bool $!may-use-return;
 
+    # Set when the `soft` pragma is in effect where the routine is declared.
+    # The pragma promises the routine stays wrappable at run time, so no
+    # inline info may be recorded for it. Captured at begin time because the
+    # pragma is a scope property, and code generation, where the info is
+    # recorded, no longer has the scope stack.
+    has int $!in-soft-scope;
+
     method multiness() {
         my $multiness := $!multiness;
         nqp::isnull_s($multiness) ?? '' !! $multiness
@@ -2083,6 +2162,8 @@ class RakuAST::Routine
     }
 
     method PERFORM-BEGIN(RakuAST::Resolver $resolver, RakuAST::IMPL::QASTContext $context) {
+        nqp::bindattr_i(self, RakuAST::Routine, '$!in-soft-scope', 1)
+            if self.IMPL-IN-SOFT-SCOPE($resolver);
         self.body.to-begin-time($resolver, $context); # In case it's the default created in the ctor.
 
         # Make sure that our placeholder signature has resolutions performed.
@@ -2278,6 +2359,7 @@ class RakuAST::Routine
                     :blocktype('declaration_static'),
                     self.IMPL-QAST-DECLS($context)
                 ), :key);
+        self.IMPL-ADD-LOWERED-DEBUG-MAPPINGS($block);
         my $signature := self.placeholder-signature || $!signature;
         $block.push($signature.IMPL-QAST-BINDINGS($context, :needs-full-binder(self.custom-args), :multi(self.multiness eq 'multi')));
         $block.custom_args(1) if self.custom-args;
@@ -2285,7 +2367,175 @@ class RakuAST::Routine
         $block.annotate('count', $signature.count);
         $block.push($body);
         self.add-phasers-handling-code($context, $block);
-        self.IMPL-MAYBE-FATALIZE-QAST($block)
+        my $formed := self.IMPL-MAYBE-FATALIZE-QAST($block);
+        self.IMPL-MAYBE-SET-INLINE-INFO($formed);
+        $formed
+    }
+
+    # A named sub whose body reduces to a tree of inlinable ops over its
+    # parameters records that tree on its code object, with each parameter
+    # use replaced by a positional placeholder. A caller that decides the
+    # dispatch at compile time splices the tree in place of the call, with
+    # the argument code standing in for the placeholders. Substituting
+    # argument code for a parameter is only identity-preserving when the
+    # binding is: every parameter must be native, required, positional, and
+    # by-value, with no constraints beyond its type. The routine itself must
+    # be a plain one: a custom invocation protocol, phasers, or the `soft`
+    # pragma's wrappability promise all keep the call.
+    method IMPL-MAYBE-SET-INLINE-INFO(Mu $block) {
+        return Nil unless nqp::istype(self, RakuAST::Sub)
+            && self.name
+            && !$!in-soft-scope;
+        my $code := self.meta-object;
+        return Nil unless nqp::isconcrete($code);
+        return Nil if nqp::can($code, 'CALL-ME');
+        return Nil if nqp::can($code, 'soft') && $code.soft;
+        return Nil if nqp::isconcrete(nqp::getattr($code, Block, '$!phasers'));
+        return Nil unless nqp::elems($block.list) == 3;
+
+        my $signature := nqp::getattr($code, Code, '$!signature');
+        my @params := nqp::getattr($signature, Signature, '@!params');
+        my int $n := nqp::elems(@params);
+        return Nil unless $n;
+        my %placeholders;
+        my int $i := -1;
+        while ++$i < $n {
+            my $param := nqp::atpos(@params, $i);
+            # Only a full-width signed int, full-width num, or str parameter
+            # binds any argument the trial bind accepts unchanged. An
+            # unsigned or narrower native wraps or truncates on binding,
+            # which argument code standing in for the parameter would skip.
+            my $param-type := nqp::getattr($param, Parameter, '$!type');
+            my int $ps := nqp::objprimspec($param-type);
+            return Nil unless $ps == 3
+                || ($ps == 1 || $ps == 2) && nqp::objprimbits($param-type) == 64;
+            my int $flags := nqp::getattr_i($param, Parameter, '$!flags');
+            return Nil if $flags +& (nqp::const::SIG_ELEM_IS_OPTIONAL
+                +| nqp::const::SIG_ELEM_IS_COPY
+                +| nqp::const::SIG_ELEM_BIND_PRIVATE_ATTR
+                +| nqp::const::SIG_ELEM_BIND_PUBLIC_ATTR);
+            return Nil if nqp::isconcrete(nqp::getattr($param, Parameter, '@!named_names'))
+                || nqp::isconcrete(nqp::getattr($param, Parameter, '@!type_captures'))
+                || nqp::isconcrete(nqp::getattr($param, Parameter, '@!post_constraints'))
+                || nqp::isconcrete(nqp::getattr($param, Parameter, '$!sub_signature'))
+                || nqp::isconcrete(nqp::getattr($param, Parameter, '$!default_value'))
+                || nqp::isconcrete(nqp::getattr($param, Parameter, '$!signature_constraint'));
+            my str $name := nqp::getattr_s($param, Parameter, '$!variable_name');
+            %placeholders{$name} := QAST::InlinePlaceholder.new(:position($i))
+                unless nqp::isnull_s($name) || $name eq '';
+        }
+
+        # The block's declarations may hold only the implicits a routine
+        # always gets and the parameters themselves. Anything else, and in
+        # particular any nested block, means the body depends on its frame.
+        for $block.list[0].list {
+            if nqp::istype($_, QAST::Var) && $_.scope eq 'lexical' {
+                my str $name := $_.name;
+                return Nil unless $name eq '$_' || $name eq '$/' || $name eq '$!'
+                    || $name eq '$¢' || $name eq '$*DISPATCHER'
+                    || nqp::existskey(%placeholders, $name);
+            }
+            elsif nqp::istype($_, QAST::Block) {
+                return Nil;
+            }
+            elsif (nqp::istype($_, QAST::Stmt) || nqp::istype($_, QAST::Stmts))
+                && nqp::elems($_.list) && nqp::istype($_.list[0], QAST::Block) {
+                return Nil;
+            }
+        }
+
+        # A body that spliced other routines' inline info is itself a
+        # candidate, so trees can compound through chains of small helpers.
+        # The node budget bounds that growth: a routine whose body walk
+        # exceeds it keeps the call, and the amount of code any single
+        # call site can splice stays small.
+        my $info;
+        my int $walked := 0;
+        my @budget := [64];
+        try {
+            $info := self.IMPL-INLINE-INFO-NODE($block.list[2], %placeholders, @budget);
+            $walked := 1;
+        }
+        if $walked && nqp::istype($info, QAST::Node) {
+            RakuAST::IMPL::VarLowering.IMPL-NOTE("INLINE-INFO " ~ self.name.canonicalize)
+                if nqp::existskey(nqp::getenvhash(), 'RAKUDO_INLINE_DEBUG');
+            nqp::bindattr($code, Routine, '$!inline_info', $info);
+        }
+        Nil
+    }
+
+    method IMPL-INLINE-INFO-CLEAR(Mu $node) {
+        $node.node(nqp::null());
+        $node.clear_annotations();
+        $node
+    }
+
+    # Rebuild a body node as inline info, dying when the body is not
+    # expressible independent of its frame: only literal values, object
+    # references other than pseudo-stashes, inlinable ops, statement and
+    # want wrappers, and parameter reads, which become placeholders, can
+    # appear. Source locations and annotations are stripped from the
+    # copies, as they describe the routine, not the call site the tree
+    # will be spliced into.
+    method IMPL-INLINE-INFO-NODE(Mu $node, %placeholders, @budget) {
+        nqp::bindpos(@budget, 0, nqp::atpos(@budget, 0) - 1);
+        nqp::die('Body too large to inline') if nqp::atpos(@budget, 0) < 0;
+        if nqp::istype($node, QAST::IVal) || nqp::istype($node, QAST::SVal)
+            || nqp::istype($node, QAST::NVal) {
+            $node.node ?? self.IMPL-INLINE-INFO-CLEAR($node.shallow_clone) !! $node
+        }
+        elsif nqp::istype($node, QAST::WVal) {
+            nqp::die('Routines using pseudo-stashes are not inlinable')
+                if $node.value.HOW.name($node.value) eq 'PseudoStash';
+            $node.node ?? self.IMPL-INLINE-INFO-CLEAR($node.shallow_clone) !! $node
+        }
+        elsif nqp::istype($node, QAST::Op) {
+            nqp::die('Non-inlinable op encountered')
+                unless nqp::getcomp('QAST').operations.is_inlinable('Raku', $node.op);
+            my $replacement := $node.shallow_clone;
+            my int $n := nqp::elems($node.list);
+            my int $i := -1;
+            while ++$i < $n {
+                nqp::bindpos($replacement.list, $i,
+                    self.IMPL-INLINE-INFO-NODE($node.list[$i], %placeholders, @budget));
+            }
+            self.IMPL-INLINE-INFO-CLEAR($replacement)
+        }
+        elsif nqp::istype($node, QAST::Var) && ($node.scope eq 'lexical' || $node.scope eq '') {
+            nqp::die('Cannot inline with non-argument variables')
+                unless nqp::existskey(%placeholders, $node.name);
+            my $replacement := %placeholders{$node.name};
+            if $node.named || $node.flat {
+                $replacement := $replacement.shallow_clone;
+                $replacement.named($node.named) if $node.named;
+                $replacement.flat($node.flat) if $node.flat;
+            }
+            $replacement
+        }
+        elsif nqp::istype($node, QAST::Stmt) || nqp::istype($node, QAST::Stmts) {
+            my $replacement := $node.shallow_clone;
+            my int $n := nqp::elems($node.list);
+            my int $i := -1;
+            while ++$i < $n {
+                nqp::bindpos($replacement.list, $i,
+                    self.IMPL-INLINE-INFO-NODE($node.list[$i], %placeholders, @budget));
+            }
+            self.IMPL-INLINE-INFO-CLEAR($replacement)
+        }
+        elsif nqp::istype($node, QAST::Want) {
+            my $replacement := $node.shallow_clone;
+            my int $n := nqp::elems($node.list);
+            my int $i := 0;
+            while $i < $n {
+                nqp::bindpos($replacement.list, $i,
+                    self.IMPL-INLINE-INFO-NODE($node.list[$i], %placeholders, @budget));
+                $i := $i + 2;
+            }
+            self.IMPL-INLINE-INFO-CLEAR($replacement)
+        }
+        else {
+            nqp::die('Unhandled node type; will not inline')
+        }
     }
 
     method IMPL-COMPILE-BODY(RakuAST::IMPL::QASTContext $context) {

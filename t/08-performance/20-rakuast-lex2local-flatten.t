@@ -3,7 +3,7 @@ use Test::Helpers::QAST;
 use Test;
 use QAST:from<NQP>;
 use nqp;
-plan 18;
+plan 30;
 
 # The sunk body of a loop statement whose every piece is provably
 # frame-independent is emitted inline rather than called as a block each
@@ -111,6 +111,31 @@ else {
     is $caught, 'c', 'a CATCH in the loop body keeps the body a frame and fires';
 }
 
+# A bare block statement flattens under the same rules. The legacy
+# optimizer cannot flatten these, since their optional topic parameter
+# defeats its arity check, so the shape is only asserted here.
+
+if nqp::ifnull(nqp::gethllsym('Raku', 'COMPILER-FRONTEND'), '') eq 'rakuast' {
+    qast-is 'my $x = 0; { $x = 5 }; say $x', :full, -> \v {
+        qast-var-decl(v, '$x', 'static')
+    }, 'a lexical used only from a flattenable bare block statement is lowered';
+}
+else {
+    skip 'bare block flattening is specific to the RakuAST frontend';
+}
+
+{
+    my $x = 0;
+    { my $t = 3; $x = $t }
+    is $x, 3, 'a flattened bare block statement runs its statements';
+}
+
+{
+    $_ = 42;
+    { $_ := 43 }
+    is $_, 42, 'a bare block that rebinds the topic keeps its frame and alias';
+}
+
 # Conditional statement branch bodies flatten the same way.
 
 qast-is 'my $sum = 0; my int $i = 0; while $i < 9 { if $i % 2 { $sum = $sum + $i } else { $sum = $sum - 1 }; $i = $i + 1 }; say $sum',
@@ -150,3 +175,65 @@ qast-is 'my $sum = 0; my int $i = 0; while $i < 9 { if $i % 2 { $sum = $sum + $i
     is with-dynamic(), 5,
         'a dynamic lookup in a branch body still walks the caller chain';
 }
+
+# Statement for and given bodies flatten as argument-taking candidates:
+# a pointy body with one plain parameter has the iteration value bound
+# to the parameter's local, and a plain body flattens when its topic
+# goes unused. The legacy optimizer flattens neither.
+
+if nqp::ifnull(nqp::gethllsym('Raku', 'COMPILER-FRONTEND'), '') eq 'rakuast' {
+    qast-is 'my $sum = 0; for ^9 -> $x { $sum = $sum + $x }; say $sum', :full, -> \v {
+        qast-var-decl(v, '$sum', 'static')
+            and not qast-var-decl(v, '$x', 'contvar')
+            and not qast-var-decl(v, '$x', 'var')
+    }, 'a pointy for body flattens, lowering the accumulator and dissolving the parameter';
+
+    qast-is 'my $n = 0; for ^5 { $n = $n + 1 }; say $n', :full, -> \v {
+        qast-var-decl(v, '$n', 'static')
+    }, 'a topic-free for body flattens and lowers the accumulator';
+
+    qast-is 'my $x = 0; given 42 { $x = 1 }; say $x', :full, -> \v {
+        qast-var-decl(v, '$x', 'static')
+    }, 'a topic-free given body flattens';
+}
+else {
+    skip 'for and given body flattening is specific to the RakuAST frontend', 3;
+}
+
+{
+    my $sum = 0;
+    for ^10 -> $x { $sum = $sum + $x }
+    is $sum, 45, 'a flattened pointy for body accumulates correctly';
+}
+
+{
+    my $s = 0;
+    for ^20 -> $i { next if $i % 2; last if $i > 8; $s = $s + $i }
+    is $s, 20, 'next and last control a flattened pointy for';
+}
+
+{
+    my @r;
+    for 1..3 { @r.push($_) }
+    is @r.join(','), '1,2,3', 'a for body using its topic behaves unchanged';
+}
+
+{
+    my @a = 1, 2, 3;
+    for @a <-> $e { $e++ }
+    is @a.join(','), '2,3,4', 'an rw pointy parameter keeps its frame and mutates';
+}
+
+{
+    my @a = 0, 1, 2;
+    for @a -> $v is rw { $v++ }
+    is @a.join(','), '1,2,3', 'an is-rw parameter keeps its frame and mutates';
+}
+
+{
+    my @c;
+    for 1..2 -> $x { @c.push({ $x }) }
+    is @c.map({ .() }).join(','), '1,2',
+        'closures over the parameter keep the body a frame per iteration';
+}
+

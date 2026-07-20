@@ -731,6 +731,7 @@ class RakuAST::Node {
             self.IMPL-MARK-STATIC-CHAIN($resolver, $expr);
             self.IMPL-MARK-RETURN-DECONT($resolver, $expr);
             self.IMPL-MARK-ARRAY-INIT($resolver, $expr);
+            self.IMPL-MARK-CT-DISPATCH($resolver, $expr);
         }
 
         # A replacement stands where the original stood, so it must carry the
@@ -1111,6 +1112,181 @@ class RakuAST::Node {
             $init.nosink(1);
         }
         $init
+    }
+
+    # Mark a call whose argument types decide the dispatch at compile time.
+    # A named sub call and an infix operator application both qualify when
+    # the callee resolves to a compile-time routine whose lexical is bound
+    # once, and every argument is a plain positional with a known nominal
+    # type. For an onlystar multi, the proto must trial-bind and the
+    # candidate analysis must land on exactly one candidate; for a plain
+    # sub, its own signature must trial-bind. The chosen routine is recorded
+    # on the node, and code generation splices its inline info, when it has
+    # any, in place of the call. A chaining operator only qualifies standing
+    # alone: a link inside a longer chain takes part in the chain op
+    # protocol, which an inlined body no longer would.
+    method IMPL-MARK-CT-DISPATCH(RakuAST::Resolver $resolver, Mu $expr) {
+        return Nil if nqp::istrue(nqp::ifnull(nqp::getlexdyn('$*NO-CT-DISPATCH'), 0));
+        my $target;
+        my @args;
+        my str $lexname;
+        if nqp::istype($expr, RakuAST::Call::Name) {
+            return Nil unless $expr.name.is-identifier
+                && $expr.is-resolved
+                && !$expr.feed-stage;
+            return Nil if nqp::isconcrete($expr.args.invocant);
+            my $arg-list := $expr.args;
+            for self.IMPL-UNWRAP-LIST($arg-list.args) {
+                return Nil if nqp::istype($_, RakuAST::NamedArg)
+                    || $arg-list.IMPL-IS-FLATTENING($_);
+                nqp::push(@args, $_);
+            }
+            $target := $expr;
+            $lexname := '&' ~ $expr.name.canonicalize;
+        }
+        elsif nqp::istype($expr, RakuAST::ApplyInfix) {
+            my $infix := $expr.infix;
+            return Nil unless nqp::istype($infix, RakuAST::Infix) && $infix.is-resolved;
+            return Nil if nqp::elems($expr.colonpairs);
+            my $left := $expr.left;
+            my $right := $expr.right;
+            if $infix.properties.chain {
+                # An operand that is itself a chain link makes this a longer
+                # chain. Its links take part in the chain op protocol, so
+                # none of them may be inlined. The operands were visited,
+                # and possibly marked, before this node was offered, so the
+                # decision they took is withdrawn here.
+                my int $linked := 0;
+                if nqp::istype($left, RakuAST::ApplyInfix)
+                    && nqp::istype($left.infix, RakuAST::Infix)
+                    && $left.infix.properties.chain {
+                    $left.infix.IMPL-CLEAR-CT-INLINE-CANDIDATE();
+                    $linked := 1;
+                }
+                if nqp::istype($right, RakuAST::ApplyInfix)
+                    && nqp::istype($right.infix, RakuAST::Infix)
+                    && $right.infix.properties.chain {
+                    $right.infix.IMPL-CLEAR-CT-INLINE-CANDIDATE();
+                    $linked := 1;
+                }
+                return Nil if $linked;
+            }
+            nqp::push(@args, $left);
+            nqp::push(@args, $right);
+            $target := $infix;
+            $lexname := '&infix' ~ $resolver.IMPL-CANONICALIZE-PAIR($infix.operator);
+        }
+        else {
+            return Nil;
+        }
+
+        my $resolution := $target.resolution;
+        return Nil unless self.IMPL-RESOLUTION-BOUND-ONCE($resolver, $resolution, $lexname);
+        my $routine := nqp::istype($resolution, RakuAST::CompileTimeValue)
+            ?? $resolution.compile-time-value
+            !! $resolution.maybe-compile-time-value;
+        return Nil unless nqp::isconcrete($routine)
+            && nqp::istype($routine, Code)
+            && nqp::can($routine, 'signature');
+
+        my @info := self.IMPL-CT-ARG-TYPES($resolver, @args);
+        return Nil unless nqp::elems(@info);
+        my @types := @info[0];
+        my @flags := @info[1];
+
+        my $chosen;
+        if nqp::can($routine, 'is_dispatcher') && $routine.is_dispatcher {
+            return Nil unless nqp::can($routine, 'onlystar') && $routine.onlystar;
+            my int $proto-ok := 0;
+            my @multi-result;
+            try {
+                $proto-ok := nqp::p6trialbind($routine.signature, @types, @flags);
+                @multi-result := $routine.analyze_dispatch(@types, @flags);
+            }
+            return Nil unless $proto-ok == 1
+                && nqp::elems(@multi-result)
+                && nqp::atpos(@multi-result, 0) == 1;
+            $chosen := nqp::atpos(@multi-result, 1);
+        }
+        else {
+            my int $ct-result := 0;
+            try $ct-result := nqp::p6trialbind($routine.signature, @types, @flags);
+            return Nil unless $ct-result == 1;
+            $chosen := $routine;
+        }
+        return Nil if nqp::can($chosen, 'soft') && $chosen.soft;
+        $target.IMPL-SET-CT-INLINE-CANDIDATE($chosen);
+        Nil
+    }
+
+    # The nominal types and native flags of the given arguments, as trial
+    # binding and candidate analysis expect them, or an empty list when any
+    # argument's type is not known well enough for the answer to be final.
+    # A native type is passed as its boxed counterpart carrying the native
+    # flag. A literal of a boxed type prefers a native candidate when it is
+    # alone or paired with a native argument of matching kind, as the same
+    # allomorphic argument would at run time.
+    method IMPL-CT-ARG-TYPES(RakuAST::Resolver $resolver, Mu @args) {
+        my int $ARG_IS_LITERAL := 32;
+        my @types;
+        my @flags;
+        my @allo;
+        my int $num-prim := 0;
+        my int $num-allo := 0;
+        for @args {
+            my $type := $_.return-type;
+            # A parameter read reports no type of its own; the declared type
+            # of the parameter's variable is the read's type. Kept local to
+            # this analysis so the trial-bind diagnostic's coverage does not
+            # change underneath existing code.
+            if $type =:= Mu
+                && nqp::istype($_, RakuAST::Var::Lexical)
+                && $_.is-resolved
+                && nqp::istype($_.resolution, RakuAST::ParameterTarget::Var)
+                && nqp::isconcrete($_.resolution.declaration) {
+                try $type := $_.resolution.declaration.return-type;
+            }
+            return [] if $type =:= Mu;
+            my int $ok := 0;
+            try $ok := $type.HOW.archetypes.nominal && !$type.HOW.archetypes.generic;
+            return [] unless $ok;
+            return [] if nqp::istype($type.HOW, Perl6::Metamodel::SubsetHOW);
+            my int $ps := nqp::objprimspec($type);
+            if $ps == 1 || $ps == 2 || $ps == 3 {
+                $type := self.IMPL-OPTIMIZE-SETTING-TYPE($resolver,
+                    $ps == 1 ?? 'Int' !! $ps == 2 ?? 'Num' !! 'Str');
+                return [] if nqp::isnull($type);
+                $num-prim++;
+            }
+            elsif $ps {
+                return [];
+            }
+            nqp::push(@types, $type);
+            nqp::push(@flags, $ps);
+            my int $allo-flag := 0;
+            if nqp::istype($_, RakuAST::Literal) {
+                my $native := $_.native-type-flag;
+                # An integer too wide for the native representation is not
+                # allomorphic: only its boxed form holds the value.
+                if nqp::defined($native)
+                    && !($native == 1
+                        && nqp::isbig_I(nqp::decont($_.compile-time-value))) {
+                    $allo-flag := $native;
+                    $num-allo++;
+                }
+            }
+            nqp::push(@allo, $allo-flag);
+        }
+        if nqp::elems(@types) == 2 && $num-prim == 1 && $num-allo == 1 {
+            my int $prim := nqp::atpos(@flags, 0) || nqp::atpos(@flags, 1);
+            my int $allo-idx := nqp::atpos(@allo, 0) ?? 0 !! 1;
+            nqp::bindpos(@flags, $allo-idx, $prim +| $ARG_IS_LITERAL)
+                if nqp::atpos(@allo, $allo-idx) == $prim;
+        }
+        elsif nqp::elems(@types) == 1 && $num-allo == 1 {
+            nqp::bindpos(@flags, 0, nqp::atpos(@allo, 0) +| $ARG_IS_LITERAL);
+        }
+        [@types, @flags]
     }
 
     # Whether a resolution's lexical is bound once, so the VM may resolve a

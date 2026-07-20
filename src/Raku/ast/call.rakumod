@@ -477,7 +477,27 @@ class RakuAST::Call::Name
         nqp::bindattr_i(self, RakuAST::Call::Name, '$!callstatic', 1)
     }
 
+    # Set by the optimize pass when the argument types decide the dispatch
+    # at compile time: the routine, for a multi the chosen candidate, whose
+    # inline info, when it has any, is spliced in place of the call.
+    has Mu $!ct-inline-candidate;
+
+    method IMPL-SET-CT-INLINE-CANDIDATE(Mu $routine) {
+        nqp::bindattr(self, RakuAST::Call::Name, '$!ct-inline-candidate', $routine)
+    }
+
     method IMPL-EXPR-QAST(RakuAST::IMPL::QASTContext $context) {
+        if nqp::isconcrete($!ct-inline-candidate) {
+            my $info := nqp::getattr($!ct-inline-candidate, Routine, '$!inline_info');
+            if nqp::isconcrete($info) && nqp::istype($info, QAST::Node) {
+                my @args-qast;
+                for self.IMPL-UNWRAP-LIST(self.args.args) {
+                    nqp::push(@args-qast, $_.IMPL-TO-QAST($context));
+                }
+                my $inlined := self.IMPL-CT-INLINE-QAST($context, $!ct-inline-candidate, @args-qast);
+                return $inlined unless nqp::isnull($inlined);
+            }
+        }
         my $call := QAST::Op.new( :op('call') );
         if $!name.is-identifier {
             if !self.is-resolved && $!name.canonicalize eq 'die' {

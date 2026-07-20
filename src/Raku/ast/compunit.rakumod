@@ -219,6 +219,9 @@ class RakuAST::CompUnit
     # (the tree is already checked, nothing is being declared), so a caller just
     # hands over a resolver.
     method optimize(RakuAST::Resolver $resolver, :$interactive?) {
+        # Diagnostic switch: turns compile-time dispatch decisions off so a
+        # suspect inlining can be ruled in or out without a rebuild.
+        my $*NO-CT-DISPATCH := nqp::existskey(nqp::getenvhash(), 'RAKUDO_NO_CT_DISPATCH');
         $resolver.push-scope(self);
         $!mainline.IMPL-OPTIMIZE($resolver);
         self.IMPL-OPTIMIZE($resolver);
@@ -591,6 +594,9 @@ class RakuAST::CompUnit
                 $!mainline.IMPL-QAST-FORM-BLOCK($context, :blocktype<declaration_static>);
         $top-level.name('<unit>');
         $top-level.annotate('IN_DECL', $!is-eval ?? 'eval' !! 'mainline');
+        # The compilation unit's own lowered declarations live in the
+        # mainline frame the shell block forms.
+        self.IMPL-ADD-LOWERED-DEBUG-MAPPINGS($top-level);
         my @pre-deserialize;
         # When compiling a CORE.<spec>.setting (setting-name shaped like
         # 'NULL.<spec>'), emit a pre-deserialize task that calls
