@@ -717,6 +717,10 @@ class RakuAST::Node {
         }
 
         if $result =:= $expr {
+            $result := self.IMPL-COLLAPSE-DEAD-BRANCH($resolver, $expr);
+        }
+
+        if $result =:= $expr {
             $result := self.IMPL-REWRITE-SQUARE($resolver, $expr);
         }
 
@@ -744,6 +748,7 @@ class RakuAST::Node {
             self.IMPL-MARK-WHEN-TYPEMATCH($resolver, $expr);
             self.IMPL-MARK-JUNCTION-FOLD($resolver, $expr);
             self.IMPL-MARK-CHAIN-LINKS($resolver, $expr);
+            self.IMPL-DROP-UNREACHABLE($resolver, $expr);
             self.IMPL-MARK-PARAM-WHERE-JUNCTION($resolver, $expr);
         }
 
@@ -2054,6 +2059,186 @@ class RakuAST::Node {
         RakuAST::Literal.from-value($value)
     }
 
+    # Whether a statement unconditionally leaves the surrounding code, so
+    # nothing after it in its statement list can run. Only the setting's
+    # return, return-rw, and exit qualify: their control transfer cannot
+    # be resumed into the following statements. A thrown exception can,
+    # since a handler's resume continues right after the throw, so die
+    # and its relatives do not qualify, and neither do the loop controls,
+    # whose control exceptions a CONTROL block can resume the same way.
+    method IMPL-STATEMENT-TERMINATES(RakuAST::Resolver $resolver, Mu $stmt) {
+        return 0 unless nqp::istype($stmt, RakuAST::Statement::Expression);
+        return 0 if nqp::isconcrete($stmt.condition-modifier)
+            || nqp::isconcrete($stmt.loop-modifier);
+        my $expr := $stmt.expression;
+        return 0 unless nqp::istype($expr, RakuAST::Call::Name)
+            && $expr.is-resolved
+            && $expr.name.is-identifier
+            && nqp::istype($expr.resolution, RakuAST::Declaration::External::Setting);
+        my str $name := $expr.name.canonicalize;
+        $name eq 'return' || $name eq 'return-rw' || $name eq 'exit'
+    }
+
+    # Statements following one that unconditionally leaves never run, so
+    # they are dropped from the list, each on its own: one that declares
+    # stays, since its lexical is visible regardless, and so does a
+    # phaser statement, whose begin-time registration outlives its
+    # position but whose spot in the list is left alone all the same.
+    method IMPL-DROP-UNREACHABLE(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return Nil;
+        }
+        return Nil unless nqp::istype(self, RakuAST::StatementList);
+        return Nil unless self.IMPL-STATEMENT-TERMINATES($resolver, $expr);
+        self.IMPL-DROP-UNREACHABLE-IN(self.IMPL-UNWRAP-LIST(self.statements), $expr);
+        self.IMPL-DROP-UNREACHABLE-IN(self.code-statements, $expr);
+        Nil
+    }
+
+    method IMPL-DROP-UNREACHABLE-IN(Mu $statements, Mu $expr) {
+        my int $n := nqp::elems($statements);
+        my int $found := -1;
+        my int $i := -1;
+        while ++$i < $n {
+            if nqp::eqaddr(nqp::atpos($statements, $i), $expr) {
+                $found := $i;
+                last;
+            }
+        }
+        return Nil if $found < 0;
+        my @kept;
+        my int $dropped := 0;
+        $i := $found;
+        while ++$i < $n {
+            my $following := nqp::atpos($statements, $i);
+            # A phaser's registration, and a CATCH or CONTROL block's
+            # installation as the scope's handler, hold wherever the
+            # statement sits, so they stay.
+            my int $declarative := nqp::istype($following, RakuAST::Statement::Catch)
+                || nqp::istype($following, RakuAST::Statement::Control)
+                || nqp::istype($following, RakuAST::Statement::Expression)
+                && nqp::istype($following.expression, RakuAST::StatementPrefix::Phaser);
+            if !$declarative && self.IMPL-DROPPABLE($following) {
+                $dropped := 1;
+            }
+            else {
+                nqp::push(@kept, $following);
+            }
+        }
+        if $dropped {
+            nqp::setelems($statements, $found + 1);
+            for @kept {
+                nqp::push($statements, $_);
+            }
+        }
+        Nil
+    }
+
+    # A conditional whose condition's truth is known at compile time
+    # keeps only the code that could run. The taken branch, a block with
+    # a scope of its own, stands as a bare block statement, which the
+    # later analysis may flatten into the enclosing frame, and a false
+    # condition with no other branch leaves the statement's Empty value.
+    # The dropped branches are code the running program could never
+    # reach, and a dropped block confines its declarations, but a
+    # dropped condition is evaluated code, so every dropped condition
+    # must be droppable. A with part tests definedness and topicalizes
+    # its value, so only plain if parts collapse.
+    method IMPL-COLLAPSE-DEAD-BRANCH(RakuAST::Resolver $resolver, Mu $expr) {
+        CATCH {
+            return $expr;
+        }
+        if nqp::istype($expr, RakuAST::Statement::IfWith) {
+            return $expr if nqp::elems(self.IMPL-UNWRAP-LIST($expr.labels));
+            return $expr unless $expr.IMPL-QAST-TYPE eq 'if';
+            my int $truth := self.IMPL-CONSTANT-TRUTH($resolver, $expr.condition);
+            return $expr if $truth < 0
+                || !self.IMPL-DROPPABLE($expr.condition);
+            if $truth {
+                return $expr unless self.IMPL-BRANCH-COLLAPSIBLE($expr.then);
+                for $expr.IMPL-UNWRAP-LIST($expr.elsifs) {
+                    return $expr unless self.IMPL-DROPPABLE($_.condition);
+                }
+                return self.IMPL-BRANCH-STATEMENT($expr.then);
+            }
+            return $expr if nqp::elems($expr.IMPL-UNWRAP-LIST($expr.elsifs));
+            my $else := $expr.else;
+            if nqp::isconcrete($else) {
+                return $expr unless self.IMPL-BRANCH-COLLAPSIBLE($else);
+                return self.IMPL-BRANCH-STATEMENT($else);
+            }
+            return self.IMPL-EMPTY-STATEMENT($resolver, $expr);
+        }
+        elsif nqp::istype($expr, RakuAST::Statement::Unless) {
+            return $expr if nqp::elems(self.IMPL-UNWRAP-LIST($expr.labels));
+            my int $truth := self.IMPL-CONSTANT-TRUTH($resolver, $expr.condition);
+            return $expr if $truth < 0
+                || !self.IMPL-DROPPABLE($expr.condition);
+            unless $truth {
+                return $expr unless self.IMPL-BRANCH-COLLAPSIBLE($expr.body);
+                return self.IMPL-BRANCH-STATEMENT($expr.body);
+            }
+            return self.IMPL-EMPTY-STATEMENT($resolver, $expr);
+        }
+        elsif nqp::istype($expr, RakuAST::Statement::Expression) {
+            return $expr if nqp::isconcrete($expr.loop-modifier)
+                || nqp::elems(self.IMPL-UNWRAP-LIST($expr.labels));
+            # A block statement under a condition modifier is invoked with
+            # the condition's value, so the modifier stays.
+            return $expr if nqp::istype($expr.expression, RakuAST::Block);
+            my $cond := $expr.condition-modifier;
+            return $expr unless nqp::isconcrete($cond);
+            my int $negated := nqp::istype($cond, RakuAST::StatementModifier::Unless);
+            return $expr unless $negated
+                || nqp::istype($cond, RakuAST::StatementModifier::If)
+                && !nqp::istype($cond, RakuAST::StatementModifier::When);
+            my int $truth := self.IMPL-CONSTANT-TRUTH($resolver, $cond.expression);
+            return $expr if $truth < 0
+                || !self.IMPL-DROPPABLE($cond.expression);
+            $truth := nqp::not_i($truth) if $negated;
+            if $truth {
+                # The statement runs unconditionally; only the test goes.
+                $expr.replace-condition-modifier(
+                    RakuAST::StatementModifier::Condition);
+                return $expr;
+            }
+            return $expr unless self.IMPL-DROPPABLE($expr.expression);
+            return self.IMPL-EMPTY-STATEMENT($resolver, $expr);
+        }
+        $expr
+    }
+
+    # Whether a surviving branch may stand alone: the if and unless
+    # statements invoke a branch that takes arguments, a pointy or one
+    # with placeholders, with the condition's value, so only a plain
+    # parameterless block runs the same on its own.
+    method IMPL-BRANCH-COLLAPSIBLE(Mu $block) {
+        nqp::eqaddr($block.WHAT, RakuAST::Block)
+            && !nqp::isconcrete($block.placeholder-signature)
+            && (!nqp::isconcrete($block.signature)
+                || nqp::elems($block.IMPL-UNWRAP-LIST(
+                    $block.signature.parameters)) == 0)
+    }
+
+    # The taken branch as a statement of its own: a bare block statement
+    # runs where it stands and yields its last statement's value, the
+    # same way the branch would have.
+    method IMPL-BRANCH-STATEMENT(Mu $block) {
+        my $statement := RakuAST::Statement::Expression.new(:expression($block));
+        $statement.mark-block-statement();
+        $statement
+    }
+
+    # A statement standing where dropped code stood, evaluating to the
+    # Empty a branchless conditional evaluates to.
+    method IMPL-EMPTY-STATEMENT(RakuAST::Resolver $resolver, Mu $expr) {
+        my $empty := $resolver.resolve-name-constant-in-setting(
+            RakuAST::Name.from-identifier('Empty'));
+        return $expr unless nqp::isconcrete($empty);
+        RakuAST::Statement::Expression.new(
+            :expression(RakuAST::Literal.from-value($empty.compile-time-value)))
+    }
+
     # The links of a longer chain take part in the chain op protocol, so
     # none of them may compile to anything but a chain op. The reduced
     # smartmatch marks decide per node and cannot see the enclosing
@@ -2618,10 +2803,15 @@ class RakuAST::Node {
             # nesting suggests. Folding the inner comparison to a literal would
             # drop that operand and change the result, so chaining infixes are
             # left for runtime.
+            # A chaining comparison folds too: the foldable-operand bound
+            # already rules out a nested chain link as an operand, and when
+            # this application is itself the link of a longer chain, the
+            # argument-position delivery below leaves the node in place, so
+            # the enclosing chain can withdraw the answer and keep its
+            # middle-operand sharing.
             $foldable := nqp::istype($infix, RakuAST::Infix)
                 && $infix.is-resolved
                 && self.IMPL-PURE-ROUTINE($infix)
-                && !$infix.properties.chain
                 && !nqp::isconcrete($expr.args.arg-at-pos(2))
                 && self.IMPL-FOLDABLE-OPERAND($expr.left)
                 && self.IMPL-FOLDABLE-OPERAND($expr.right);
@@ -2670,6 +2860,12 @@ class RakuAST::Node {
         return $expr unless @result[0];
         my $value := @result[1];
         return $expr unless self.IMPL-FOLDABLE-VALUE($resolver, $value);
+
+        if nqp::istype($expr, RakuAST::ApplyInfix)
+            && nqp::istype($expr.infix, RakuAST::Infix)
+            && $expr.infix.properties.chain {
+            return self.IMPL-SMARTMATCH-FOLD-RESULT($expr, $value);
+        }
 
         my $literal := RakuAST::Literal.from-value($value);
         $literal.set-origin($expr.origin) if nqp::isconcrete($expr.origin);

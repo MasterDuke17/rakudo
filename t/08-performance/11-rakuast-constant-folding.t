@@ -37,7 +37,7 @@ ok optimized-deparse(Q[my $y = 3 / 4]).contains('= 0.75'),       'integer divisi
 ok optimized-deparse(Q[my $s = (2 ** 10).Str]).contains('1024.Str'),         'a method call invocant folds';
 ok optimized-deparse(Q[my $p = (status => 6 * 7)]).contains('status => 42'), 'a pair value folds';
 ok optimized-deparse(Q[my $x = do { 100 - 1 }]).contains('99'),              'a block final value folds';
-ok optimized-deparse(Q[say "x" if 2 ** 3]).contains('if 8'),                 'a statement modifier condition folds';
+ok optimized-deparse(Q[{ say "x" } if 2 ** 3]).contains('if 8'),             'a statement modifier condition folds';
 ok optimized-deparse(Q[my @a = [2 + 3, 4 * 5]]).contains('[5, 20]'),         'array composer elements fold';
 ok optimized-deparse(Q[my @a; @a[2 + 3]]).contains('[5]'),                   'an index expression folds';
 ok optimized-deparse(Q[sub f($x = 2 + 3) { }]).contains('= 5'),              'a parameter default folds';
