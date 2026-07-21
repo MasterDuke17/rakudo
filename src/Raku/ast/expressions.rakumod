@@ -506,6 +506,57 @@ class RakuAST::Infix
         nqp::bindattr(self, RakuAST::Infix, '$!ct-inline-candidate', nqp::null())
     }
 
+    # Set by the optimize pass when this smartmatch reduces to a literal
+    # comparison: the literal, the setting comparison, and the guard types.
+    has int $!litmatch;
+    has Mu $!litmatch-data;
+
+    method IMPL-SET-LITMATCH(Mu $data) {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!litmatch', 1);
+        nqp::bindattr(self, RakuAST::Infix, '$!litmatch-data', $data);
+    }
+
+    # Set by the optimize pass when this smartmatch against a compile-time
+    # Pair reduces to asking the topic the method the key names.
+    has int $!pairmatch;
+    has Mu $!pairmatch-data;
+
+    method IMPL-SET-PAIRMATCH(Mu $data) {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!pairmatch', 1);
+        nqp::bindattr(self, RakuAST::Infix, '$!pairmatch-data', $data);
+    }
+
+    # Set by the optimize pass when a junction operand of this comparison
+    # in boolean position unfolds to a short-circuit chain: which side
+    # holds the junction, and the Junction type for the shape checks.
+    has int $!junction-fold;
+    has Mu $!junction-fold-junction;
+
+    method IMPL-SET-JUNCTION-FOLD(int $side, Mu $junction) {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!junction-fold', $side);
+        nqp::bindattr(self, RakuAST::Infix, '$!junction-fold-junction', $junction);
+    }
+
+    # An enclosing chain withdraws a link's reduced-smartmatch decisions:
+    # a link must stay a chain op for the chain protocol.
+    method IMPL-CLEAR-SMARTMATCH-MARKS() {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!typematch', 0);
+        nqp::bindattr_i(self, RakuAST::Infix, '$!litmatch', 0);
+        nqp::bindattr_i(self, RakuAST::Infix, '$!pairmatch', 0);
+        nqp::bindattr_i(self, RakuAST::Infix, '$!junction-fold', 0);
+        nqp::bindattr_i(self, RakuAST::Infix, '$!smartmatch-folded', 0);
+    }
+
+    # Set by the optimize pass when the smartmatch is decided outright in
+    # an argument position, where the node cannot be replaced.
+    has int $!smartmatch-folded;
+    has Mu $!smartmatch-fold-value;
+
+    method IMPL-SET-SMARTMATCH-FOLD(Mu $value) {
+        nqp::bindattr_i(self, RakuAST::Infix, '$!smartmatch-folded', 1);
+        nqp::bindattr(self, RakuAST::Infix, '$!smartmatch-fold-value', $value);
+    }
+
     # Set by the optimize pass on the assignment of a comma list to a plain
     # array variable, for lowering to a direct build of the list internals.
     has int $!lowered-array-init;
@@ -571,7 +622,15 @@ class RakuAST::Infix
                               Mu $left-qast,
                               Mu $right-qast
     ) {
+        if $!smartmatch-folded {
+            $context.ensure-sc($!smartmatch-fold-value);
+            return QAST::WVal.new( :value($!smartmatch-fold-value) );
+        }
         return self.IMPL-TYPEMATCH-QAST($context, $left-qast) if $!typematch;
+        return self.IMPL-LITMATCH-QAST($context, $left-qast, $!litmatch-data,
+            $!operator eq '!~~' ?? 1 !! 0) if $!litmatch;
+        return self.IMPL-PAIRMATCH-QAST($context, $left-qast, $!pairmatch-data,
+            $!operator eq '!~~' ?? 1 !! 0) if $!pairmatch;
 
         # Operators that map directly into a QAST op
         my constant QAST-OP := nqp::hash(
@@ -605,6 +664,18 @@ class RakuAST::Infix
             my $inlined := self.IMPL-CT-INLINE-QAST(
                 $context, $!ct-inline-candidate, [$left-qast, $right-qast]);
             return $inlined unless nqp::isnull($inlined);
+        }
+
+        # A comparison in boolean position with a junction operand
+        # unfolds to short-circuit comparisons per eigenstate.
+        if $!junction-fold {
+            my $folded := self.IMPL-JUNCTION-FOLD-QAST($context,
+                self.properties.chain
+                    ?? ($!chainstatic ?? 'chainstatic' !! 'chain')
+                    !! 'call',
+                $name, $left-qast, $right-qast,
+                $!junction-fold, $!junction-fold-junction);
+            return $folded unless nqp::isnull($folded);
         }
 
         # Otherwise, it's called by finding the lexical sub to call, and
